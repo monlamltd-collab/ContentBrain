@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@700&family=DM+Sans:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: {{WIDTH}}px;
+    height: {{HEIGHT}}px;
+    background: {{CREAM}};
+    display: flex;
+    flex-direction: column;
+    font-family: {{BODY_FONT}};
+    overflow: hidden;
+    position: relative;
+  }
+
+  .logo {
+    position: absolute;
+    top: 48px;
+    left: 48px;
+    height: 72px;
+  }
+
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 120px 64px 0;
+  }
+
+  .headline {
+    font-family: {{HEADING_FONT}};
+    font-size: {{HEADLINE_SIZE}}px;
+    font-weight: 700;
+    color: {{NAVY}};
+    line-height: 1.15;
+    margin-bottom: 24px;
+  }
+
+  .body-text {
+    font-size: 26px;
+    color: {{NAVY}};
+    opacity: 0.75;
+    line-height: 1.5;
+  }
+
+  .cta-bar {
+    background: {{GREEN}};
+    padding: 28px 64px;
+    display: flex;
+    align-items: center;
+  }
+
+  .cta-text {
+    font-family: {{BODY_FONT}};
+    font-size: 24px;
+    font-weight: 500;
+    color: #ffffff;
+    letter-spacing: 0.02em;
+  }
+</style>
+</head>
+<body>
+  <img class="logo" src="{{LOGO_URL}}" alt="logo">
+  <div class="content">
+    <div class="headline">{{HEADLINE}}</div>
+    <div class="body-text">{{BODY}}</div>
+  </div>
+  <div class="cta-bar">
+    <span class="cta-text">{{CTA}}</span>
+  </div>
+</body>
+</html>

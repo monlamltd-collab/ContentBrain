@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@700&family=DM+Sans:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: {{WIDTH}}px;
+    height: {{HEIGHT}}px;
+    background: {{NAVY}};
+    display: flex;
+    flex-direction: column;
+    font-family: {{BODY_FONT}};
+    overflow: hidden;
+    position: relative;
+  }
+
+  .title-line {
+    background: {{GREEN}};
+    padding: 48px 64px 20px;
+  }
+
+  .title-text {
+    font-family: {{HEADING_FONT}};
+    font-size: {{TITLE_SIZE}}px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1.2;
+  }
+
+  .list {
+    flex: 1;
+    padding: 40px 64px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 28px;
+  }
+
+  .list-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+  }
+
+  .marker {
+    width: 12px;
+    height: 12px;
+    min-width: 12px;
+    background: {{RED}};
+    border-radius: 50%;
+    margin-top: 10px;
+  }
+
+  .item-text {
+    font-size: 28px;
+    color: {{CREAM}};
+    line-height: 1.4;
+  }
+
+  .logo {
+    position: absolute;
+    bottom: 48px;
+    right: 48px;
+    height: 72px;
+  }
+</style>
+</head>
+<body>
+  <div class="title-line">
+    <div class="title-text">{{HEADLINE}}</div>
+  </div>
+  <div class="list">
+    {{LIST_ITEMS}}
+  </div>
+  <img class="logo" src="{{LOGO_URL}}" alt="logo">
+</body>
+</html>

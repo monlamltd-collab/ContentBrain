@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@700&family=DM+Sans:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: {{WIDTH}}px;
+    height: {{HEIGHT}}px;
+    background: {{NAVY}};
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: {{BODY_FONT}};
+    overflow: hidden;
+  }
+
+  .stat {
+    font-family: {{HEADING_FONT}};
+    font-size: {{STAT_SIZE}}px;
+    font-weight: 700;
+    color: {{CREAM}};
+    text-align: center;
+    line-height: 1.1;
+    padding: 0 60px;
+  }
+
+  .divider {
+    width: 120px;
+    height: 4px;
+    background: {{RED}};
+    margin: 32px auto;
+    border-radius: 2px;
+  }
+
+  .caption {
+    font-size: 28px;
+    color: {{CREAM}};
+    opacity: 0.85;
+    text-align: center;
+    padding: 0 80px;
+    line-height: 1.4;
+  }
+
+  .logo {
+    position: absolute;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    height: 80px;
+  }
+</style>
+</head>
+<body>
+  <div class="stat">{{HEADLINE}}</div>
+  <div class="divider"></div>
+  <div class="caption">{{BODY}}</div>
+  <img class="logo" src="{{LOGO_URL}}" alt="logo">
+</body>
+</html>
