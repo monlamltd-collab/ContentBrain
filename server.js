@@ -1,7 +1,11 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
-const { getDraftPosts, updatePostStatus, getPostById } = require('./lib/supabase');
+const cron = require('node-cron');
+const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById } = require('./lib/supabase');
+const { publishToMake } = require('./lib/publish');
+const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
+const { saveBrief, insertPost } = require('./lib/supabase');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -112,6 +116,7 @@ function dashboardPage(posts) {
         <span class="badge template">${post.template_type}</span>
       </div>
       ${post.image_url ? `<img src="/output/${post.image_url}" class="preview" alt="preview">` : ''}
+      ${post.video_url ? `<div class="video-wrap"><video src="/output/${post.video_url}" class="preview" controls muted preload="metadata"></video><span class="video-badge">MP4</span></div>` : ''}
       <div class="copy">
         <strong>${escapeHtml(post.copy_headline || '')}</strong>
         <p>${escapeHtml(post.copy_body || '')}</p>
@@ -143,6 +148,9 @@ function dashboardPage(posts) {
   .platform { background: #e8e8e8; color: #333; }
   .template { background: #fdf2e9; color: #C0392B; }
   .preview { width: 100%; aspect-ratio: 1; object-fit: cover; }
+  .video-wrap { position: relative; }
+  .video-wrap video { width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
+  .video-badge { position: absolute; top: 8px; right: 8px; background: #C0392B; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
   .copy { padding: 16px; }
   .copy strong { display: block; font-size: 18px; color: #1a2b4b; margin-bottom: 8px; }
   .copy p { color: #555; line-height: 1.5; margin-bottom: 8px; white-space: pre-line; }
@@ -183,7 +191,407 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ── CRON JOBS ──
+
+// Generate new content daily at 7am
+cron.schedule('0 7 * * *', async () => {
+  console.log(`[${new Date().toISOString()}] Cron: generating content...`);
+  try {
+    const { generateBatch } = require('./lib/generate');
+    const { renderPost } = require('./lib/renderer');
+    const { renderVideo } = require('./lib/video-renderer');
+    const { insertPost } = require('./lib/supabase');
+    const { sendNotification } = require('./lib/telegram');
+
+    const posts = await generateBatch();
+    const savedPosts = [];
+
+    for (const post of posts) {
+      try {
+        const { filename } = await renderPost(post.template_type, post.brand, post);
+
+        let videoFilename = null;
+        try {
+          const video = await renderVideo(post.template_type, post.brand, post);
+          videoFilename = video.filename;
+        } catch (videoErr) {
+          console.warn(`  Video render skipped: ${videoErr.message}`);
+        }
+
+        const daysAhead = Math.floor(savedPosts.length / 2);
+        const hour = savedPosts.length % 2 === 0 ? 9 : 14;
+        const scheduledFor = new Date();
+        scheduledFor.setDate(scheduledFor.getDate() + daysAhead + 1);
+        scheduledFor.setHours(hour, 0, 0, 0);
+
+        const saved = await insertPost({
+          brand: post.brand,
+          platform: post.platform,
+          template_type: post.template_type,
+          copy_headline: post.copy_headline,
+          copy_body: post.copy_body,
+          copy_cta: post.copy_cta,
+          image_url: filename,
+          video_url: videoFilename,
+          status: 'draft',
+          scheduled_for: scheduledFor.toISOString()
+        });
+
+        savedPosts.push(saved);
+
+        // Send to Telegram with video preview + approve/reject buttons
+        await sendPostForReview(saved);
+      } catch (err) {
+        console.error(`  Error processing ${post.brand}/${post.template_type}: ${err.message}`);
+      }
+    }
+
+    console.log(`[${new Date().toISOString()}] Cron: ${savedPosts.length} posts generated and sent to Telegram.`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Cron generate error:`, err.message);
+  }
+});
+
+// Publish approved posts every 15 minutes
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    const posts = await getApprovedPosts();
+    if (!posts.length) return;
+
+    console.log(`[${new Date().toISOString()}] Cron: publishing ${posts.length} approved posts...`);
+    for (const post of posts) {
+      try {
+        await publishToMake(post);
+        await updatePostStatus(post.id, 'published');
+        console.log(`  Published: ${post.id} (${post.brand}/${post.platform})`);
+      } catch (err) {
+        console.error(`  Error publishing ${post.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Cron publish error:`, err.message);
+  }
+});
+
+// ── TELEGRAM BOT POLLING ──
+// Listen for approve/reject button presses
+
+let telegramOffset = 0;
+let pendingRevision = null; // { postId, messageId, chatId }
+
+async function pollTelegram() {
+  if (!BOT_TOKEN) return;
+
+  try {
+    const res = await fetch(`${API}/getUpdates?offset=${telegramOffset}&timeout=30&allowed_updates=["callback_query","message"]`);
+    if (!res.ok) return;
+
+    const { result } = await res.json();
+    for (const update of result) {
+      telegramOffset = update.update_id + 1;
+
+      // Handle approve/reject button presses
+      const cb = update.callback_query;
+      if (cb && cb.data) {
+        // Support both prefixed (cb:approve:id) and legacy (approve:id) formats
+        const parts = cb.data.split(':');
+        let action, postId;
+        if (parts.length === 3 && parts[0] === 'cb') {
+          action = parts[1];
+          postId = parts[2];
+        } else {
+          action = parts[0];
+          postId = parts[1];
+        }
+
+        if (postId && ['approve', 'reject'].includes(action)) {
+          try {
+            const status = action === 'approve' ? 'approved' : 'rejected';
+            await updatePostStatus(postId, status);
+
+            const emoji = action === 'approve' ? 'APPROVED' : 'REJECTED';
+            const originalCaption = cb.message?.caption || cb.message?.text || '';
+            await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\n${emoji}`);
+            await answerCallback(cb.id, `Post ${status}`);
+
+            console.log(`[Telegram] Post ${postId} ${status}`);
+          } catch (err) {
+            console.error(`[Telegram] Error handling callback: ${err.message}`);
+            await answerCallback(cb.id, 'Error — try again');
+          }
+        }
+
+        if (postId && action === 'revise') {
+          pendingRevision = { postId, chatId: cb.message.chat.id, messageId: cb.message.message_id };
+          await answerCallback(cb.id, 'Send your feedback');
+          await sendNotification('What would you like changed? Reply with your feedback.');
+          console.log(`[Telegram] Revision requested for ${postId}`);
+        }
+
+        continue;
+      }
+
+      // Handle video uploads — generate caption and create draft post
+      const msg = update.message;
+      if (msg && (msg.video || msg.video_note) && String(msg.chat.id) === String(CHAT_ID)) {
+        try {
+          await sendNotification('Got your video — generating a caption...');
+
+          const video = msg.video || msg.video_note;
+          const fileId = video.file_id;
+          const userCaption = msg.caption || '';
+          const filename = `uploaded-${Date.now()}.mp4`;
+
+          // Download from Telegram
+          const rawFilename = `uploaded-raw-${Date.now()}.mp4`;
+          await downloadTelegramFile(fileId, rawFilename);
+          console.log(`[Telegram] Downloaded video: ${rawFilename}`);
+
+          // Watermark with AuctionBrain logo
+          const { execSync } = require('child_process');
+          const ffmpeg = require('ffmpeg-static');
+          const logoPath = path.join(__dirname, 'LOGOS', 'auctionbrain-logo-transparent.png');
+          const rawPath = path.join(__dirname, 'output', rawFilename);
+          const outPath = path.join(__dirname, 'output', filename);
+
+          try {
+            execSync(
+              `"${ffmpeg}" -i "${rawPath}" -i "${logoPath}" -filter_complex "[1:v]scale=700:-1,format=rgba,colorchannelmixer=aa=0.9[logo];[0:v][logo]overlay=W-w-50:H-h-50" -c:a copy -y "${outPath}"`,
+              { stdio: 'pipe' }
+            );
+            // Clean up raw file
+            const fsSync = require('fs');
+            if (fsSync.existsSync(rawPath)) fsSync.unlinkSync(rawPath);
+            console.log(`[Telegram] Watermarked video: ${filename}`);
+          } catch (ffErr) {
+            console.warn(`[Telegram] Watermark failed, using raw: ${ffErr.message}`);
+            // Fall back to raw file without watermark
+            const fsSync = require('fs');
+            if (fsSync.existsSync(rawPath)) fsSync.renameSync(rawPath, outPath);
+          }
+
+          // Generate caption with Claude
+          const Anthropic = require('@anthropic-ai/sdk');
+          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+          const { brands } = require('./lib/config');
+          const b = brands.auctionbrain;
+
+          const prompt = userCaption
+            ? `The content owner sent a video with this note: "${userCaption}"\n\nWrite a short, engaging Facebook post caption for this video. The brand is ${b.name} (${b.url}) targeting ${b.audience}. Tone: ${b.tone}. British English, no hashtags in the caption. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }`
+            : `Write a short, engaging Facebook post caption for a video posted by ${b.name} (${b.url}) targeting ${b.audience}. Tone: ${b.tone}. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }`;
+
+          const response = await anthropic.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 500,
+            messages: [{ role: 'user', content: prompt }]
+          });
+
+          const text = response.content[0].text;
+          const match = text.match(/\{[\s\S]*\}/);
+          const copy = match ? JSON.parse(match[0]) : { copy_headline: userCaption || 'New video', copy_body: '', copy_cta: b.url };
+
+          // Schedule for next available slot
+          const scheduledFor = new Date();
+          scheduledFor.setDate(scheduledFor.getDate() + 1);
+          scheduledFor.setHours(12, 0, 0, 0);
+
+          const saved = await insertPost({
+            brand: 'auctionbrain',
+            platform: 'facebook',
+            template_type: 'uploaded',
+            copy_headline: copy.copy_headline,
+            copy_body: copy.copy_body || '',
+            copy_cta: copy.copy_cta || '',
+            image_url: null,
+            video_url: filename,
+            status: 'draft',
+            scheduled_for: scheduledFor.toISOString()
+          });
+
+          await sendPostForReview(saved);
+          console.log(`[Telegram] Uploaded video post created: ${saved.id}`);
+        } catch (err) {
+          console.error(`[Telegram] Error processing video: ${err.message}`);
+          await sendNotification(`Error processing video: ${err.message}`);
+        }
+        continue;
+      }
+
+      // Handle text messages
+      if (msg && msg.text && String(msg.chat.id) === String(CHAT_ID)) {
+        const text = msg.text.trim();
+
+        // Handle pending revision feedback
+        if (pendingRevision && !text.startsWith('/')) {
+          const rev = pendingRevision;
+          pendingRevision = null;
+          try {
+            await sendNotification('Revising...');
+            const post = await getPostById(rev.postId);
+
+            const Anthropic = require('@anthropic-ai/sdk');
+            const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+            const { brands } = require('./lib/config');
+            const b = brands[post.brand] || brands.auctionbrain;
+
+            const response = await anthropic.messages.create({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 500,
+              messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nThe content owner wants this change: "${text}"\n\nRewrite the post incorporating their feedback. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
+            });
+
+            const aiText = response.content[0].text;
+            const match = aiText.match(/\{[\s\S]*\}/);
+            if (!match) throw new Error('No JSON in Claude response');
+            const revised = JSON.parse(match[0]);
+
+            // Update the post in Supabase
+            const { supabase } = require('./lib/supabase');
+            await supabase.from('posts').update({
+              copy_headline: revised.copy_headline,
+              copy_body: revised.copy_body || '',
+              copy_cta: revised.copy_cta || ''
+            }).eq('id', rev.postId);
+
+            // Send revised post for review
+            await sendPostForReview({ ...post, ...revised });
+            console.log(`[Telegram] Post ${rev.postId} revised`);
+          } catch (err) {
+            console.error(`[Telegram] Revision error: ${err.message}`);
+            await sendNotification(`Revision failed: ${err.message}`);
+          }
+          continue;
+        }
+
+        // /generate — create new posts now
+        if (text === '/generate') {
+          try {
+            await sendNotification('Generating posts now...');
+            const { generateBatch } = require('./lib/generate');
+            const { renderPost } = require('./lib/renderer');
+            const { renderVideo } = require('./lib/video-renderer');
+
+            const posts = await generateBatch();
+            for (const post of posts) {
+              try {
+                const { filename } = await renderPost(post.template_type, post.brand, post);
+                let videoFilename = null;
+                try {
+                  const video = await renderVideo(post.template_type, post.brand, post);
+                  videoFilename = video.filename;
+                } catch (videoErr) {
+                  console.warn(`  Video render skipped: ${videoErr.message}`);
+                }
+
+                const scheduledFor = new Date();
+                scheduledFor.setHours(scheduledFor.getHours() + 1, 0, 0, 0);
+
+                const saved = await insertPost({
+                  brand: post.brand,
+                  platform: post.platform,
+                  template_type: post.template_type,
+                  copy_headline: post.copy_headline,
+                  copy_body: post.copy_body,
+                  copy_cta: post.copy_cta,
+                  image_url: filename,
+                  video_url: videoFilename,
+                  status: 'draft',
+                  scheduled_for: scheduledFor.toISOString()
+                });
+                await sendPostForReview(saved);
+              } catch (err) {
+                console.error(`  Error: ${err.message}`);
+              }
+            }
+            console.log(`[Telegram] /generate completed: ${posts.length} posts`);
+          } catch (err) {
+            await sendNotification(`Generate failed: ${err.message}`);
+          }
+          continue;
+        }
+
+        // /publish — publish all approved posts now
+        if (text === '/publish') {
+          try {
+            const approved = await getApprovedPosts();
+            if (!approved.length) {
+              await sendNotification('No approved posts to publish.');
+              continue;
+            }
+            await sendNotification(`Publishing ${approved.length} post(s)...`);
+            let published = 0;
+            for (const post of approved) {
+              try {
+                await publishToMake(post);
+                await updatePostStatus(post.id, 'published');
+                published++;
+              } catch (err) {
+                console.error(`  Error publishing ${post.id}: ${err.message}`);
+              }
+            }
+            await sendNotification(`Done — ${published}/${approved.length} posts published.`);
+          } catch (err) {
+            await sendNotification(`Publish failed: ${err.message}`);
+          }
+          continue;
+        }
+
+        // /status — quick overview
+        if (text === '/status') {
+          try {
+            const drafts = await getDraftPosts();
+            const approved = await getApprovedPosts();
+            const { getPendingBriefs } = require('./lib/supabase');
+            const briefs = await getPendingBriefs();
+            await sendNotification(
+              `<b>ContentBrain Status</b>\n\n` +
+              `Drafts awaiting review: ${drafts.length}\n` +
+              `Approved (ready to publish): ${approved.length}\n` +
+              `Pending briefs: ${briefs.length}`
+            );
+          } catch (err) {
+            await sendNotification(`Status check failed: ${err.message}`);
+          }
+          continue;
+        }
+
+        // /help
+        if (text === '/help') {
+          await sendNotification(
+            `<b>ContentBrain Commands</b>\n\n` +
+            `/generate — create new posts now\n` +
+            `/publish — publish all approved posts now\n` +
+            `/status — check drafts, approved, briefs\n` +
+            `/help — show this message\n\n` +
+            `Or just send a text message to brief tomorrow's posts, or send a video to create a watermarked post.`
+          );
+          continue;
+        }
+
+        // Unknown command
+        if (text.startsWith('/')) continue;
+
+        // Content brief
+        try {
+          await saveBrief(text);
+          await sendNotification(`Noted — I'll work this into tomorrow's posts:\n\n<i>"${text}"</i>`);
+          console.log(`[Telegram] Brief saved: ${text.slice(0, 50)}...`);
+        } catch (err) {
+          console.error(`[Telegram] Error saving brief: ${err.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Silence network errors, will retry next poll
+  }
+
+  setTimeout(pollTelegram, 1000);
+}
+
 // ── START ──
 app.listen(PORT, () => {
   console.log(`ContentBrain review UI running on port ${PORT}`);
+  console.log('Cron: generate at 7am daily, publish every 15 mins');
+  console.log('Telegram: polling for approve/reject buttons');
+  pollTelegram();
 });
