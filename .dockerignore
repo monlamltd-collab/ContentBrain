@@ -1,0 +1,9 @@
+node_modules
+.env
+output
+.planning
+.claude
+graphify-out
+LOGOS
+*.md
+.git
