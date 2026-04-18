@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { generateBatch } = require('../lib/generate');
 const { renderPost } = require('../lib/renderer');
+const { renderVideo } = require('../lib/video-renderer');
 const { insertPost } = require('../lib/supabase');
 const { sendNotification } = require('../lib/telegram');
 
@@ -12,13 +13,24 @@ async function run() {
   const posts = await generateBatch();
   console.log(`  Generated ${posts.length} posts\n`);
 
-  // Step 2: Render graphics
-  console.log('Step 2: Rendering graphics...');
+  // Step 2: Render graphics (PNG) + videos (MP4)
+  console.log('Step 2: Rendering graphics + videos...');
   const savedPosts = [];
   for (const post of posts) {
     try {
+      // Render static PNG
       const { filename } = await renderPost(post.template_type, post.brand, post);
-      console.log(`  Rendered: ${filename}`);
+      console.log(`  Rendered PNG: ${filename}`);
+
+      // Render animated MP4 video
+      let videoFilename = null;
+      try {
+        const video = await renderVideo(post.template_type, post.brand, post);
+        videoFilename = video.filename;
+        console.log(`  Rendered MP4: ${videoFilename}`);
+      } catch (videoErr) {
+        console.warn(`  Video render skipped for ${post.brand}/${post.template_type}: ${videoErr.message}`);
+      }
 
       // Step 3: Store in Supabase
       const scheduledFor = getNextScheduleSlot(savedPosts.length);
@@ -30,6 +42,7 @@ async function run() {
         copy_body: post.copy_body,
         copy_cta: post.copy_cta,
         image_url: filename,
+        video_url: videoFilename,
         status: 'draft',
         scheduled_for: scheduledFor.toISOString()
       });

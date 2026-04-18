@@ -6,62 +6,72 @@ Copy-paste this into the next session:
 
 We're in ~/Documents/GitHub/ContentBrain. Building ContentBrain v2 — automated social media content pipeline for AuctionBrain and BridgeMatch.
 
-## What's done (v1 — fully working):
-- Claude Haiku generates 6 posts per run (3 per brand)
+## What's done (v1 + v2.0 + v2.1 — fully working):
+- Claude Haiku generates 3 posts per run (AuctionBrain only for now, all targeting Facebook)
 - Puppeteer renders 4 HTML/CSS graphic templates (stat, hook, list, reel) as PNG
+- Remotion renders animated MP4 videos with background music (5 tracks in public/music/)
 - Posts stored in Supabase `posts` table (draft/approved/rejected/published)
 - Express review UI at localhost:3000 (password: contentbrain2026)
-- Make.com webhook publishes approved posts to Facebook (confirmed working, live post made)
-- Telegram notifications when drafts ready
+- **Direct Facebook Graph API publishing** — permanent page tokens, no Make.com dependency
+  - AuctionBrain page ID: 1005815299290301
+  - BridgeMatch page ID: 975090445696140
+  - Both have permanent (never-expire) tokens in .env
+- Telegram bot for notifications, approve/revise/reject workflow
+- **Smart revision flow** — LLM classifies feedback (copy change vs video change vs both), re-renders video at requested duration if needed
+- **Wake recovery** — 30-min cron catches missed daily generation if PC was sleeping
+- **Startup notifications** — Telegram ping on every server start with status summary
+- **Error alerting** — publish failures and Telegram send failures notify via Telegram
 - Supabase project: pohrbfhftbprlfzsozyj (shared with AuctionBrain)
 
-## What we're building now (v2):
+## What was changed this session (2026-04-18):
+1. Diagnosed pipeline: server running via PM2 but Telegram sends were failing silently, posts stuck as drafts
+2. Fixed lib/telegram.js — sendPostForReview now returns {ok, error}, all failures logged with status codes
+3. Replaced Make.com with direct Facebook Graph API in lib/publish.js — publish() smart router tries FB direct first, Make.com fallback
+4. Added per-brand Facebook pages (AuctionBrain + BridgeMatch) with permanent tokens
+5. Added wake recovery cron, startup notification, publish error alerts to server.js
+6. Changed lib/generate.js — all posts now target Facebook (was distributing across fb/linkedin/tiktok)
+7. Upgraded revision flow — LLM classifies feedback type, can re-render videos at custom duration
+8. Video renderer accepts overrideDurationSeconds for revision-triggered re-renders
 
-### v2.0 — Remotion video templates (START HERE)
-Remotion is installed (remotion, @remotion/cli, @remotion/renderer, @remotion/bundler).
-Need to:
-1. Create `video/` directory with Remotion project structure (Root.jsx, compositions)
-2. Build 4 animated video compositions matching the 4 template types:
-   - StatVideo: number counter animation, fade-in caption, red divider sweep
-   - HookVideo: headline slide-in, body fade, green CTA bar slides up
-   - ListVideo: green title bar, bullet points appear one by one with red markers
-   - ReelVideo: 9:16, large text zoom-in, subline fade
-3. All compositions accept brand props (colours, fonts, messages) from lib/config.js
-4. Add royalty-free background music support
-5. Create lib/video-renderer.js that uses @remotion/renderer to render compositions to MP4
-6. Update workers/generate-content.js to generate video posts alongside static PNGs
-7. Update Make.com payload to handle video files
+## What to do next — DEPLOY TO RAILWAY:
+Simon has Railway Hobby plan ($5/mo). Deploy ContentBrain so it runs 24/7 without his PC.
 
-### v2.1 — Screenshot posts from live AuctionBrain app
-### v2.2 — Carousel/multi-image posts
-### v2.3 — Royalty-free music library + audio overlay
+### Railway deployment steps:
+1. Set up Railway project linked to GitHub repo (or deploy from local)
+2. Add all env vars from .env to Railway's environment settings
+3. Ensure Procfile exists (or configure start command: `node server.js`)
+4. Handle Remotion/Puppeteer dependencies — Railway needs Chrome/Chromium for rendering
+   - May need `@sparticuz/chromium` or Railway's nixpacks buildpack with Chrome
+   - Or Dockerfile with Chrome pre-installed
+5. Switch Telegram from polling to webhook (more efficient for serverless-adjacent hosting)
+6. Test full pipeline: generate → Telegram review → approve → Facebook publish
+7. Disable PM2 on Simon's PC once Railway is confirmed working
 
-### v3.0-3.3 — Engagement tracking loop
-- Facebook metrics via Make.com native module
-- LinkedIn + TikTok metrics via direct API (apps submitted for review)
-- post_metrics Supabase table
-- Claude weekly analysis + auto prompt adjustment
-
-## Brand specs:
-- AuctionBrain: navy #1a2b4b, green #0f8a5f, cream #faf8f4, red #C0392B, Source Serif 4 headings, DM Sans body
-- BridgeMatch: same colours, professional/reassuring tone
+### Other pending items:
+- LinkedIn: Community Management API pending approval, then wire up direct posting
+- TikTok: Parked until LinkedIn works (need demo for app review)
+- Make.com: Can disable scenario entirely — only kept as dormant fallback code
+- Default video durations could be longer (currently 6-8s, text-heavy content needs more time)
 
 ## Key files:
 - lib/config.js — brand colours, fonts, messages
-- lib/renderer.js — Puppeteer PNG renderer (working)
-- lib/generate.js — Claude copy generation (working)
-- lib/publish.js — Make.com webhook (working)
-- lib/supabase.js — DB operations (working)
-- server.js — Review UI (working)
-- workers/generate-content.js — main generation worker
-- workers/publish-content.js — publishing worker
-- templates/*.html — 4 static graphic templates
+- lib/renderer.js — Puppeteer PNG renderer
+- lib/video-renderer.js — Remotion MP4 renderer (supports overrideDurationSeconds)
+- lib/generate.js — Claude copy generation (all posts → facebook now)
+- lib/publish.js — publish() smart router: Facebook direct + Make.com fallback
+- lib/supabase.js — DB operations
+- lib/telegram.js — Telegram bot with error-returning sends
+- server.js — Express + crons + Telegram polling + smart revision flow
+- video/Root.jsx — Remotion composition registry
+- video/compositions/*.jsx — 4 video compositions with music support
+- public/music/ — 5 royalty-free background tracks
 
-## Env vars configured:
-SUPABASE_URL, SUPABASE_ANON_KEY (service role key), CLAUDE_API_KEY, MAKE_WEBHOOK_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, REVIEW_UI_PASSWORD
+## Env vars (all in .env):
+SUPABASE_URL, SUPABASE_ANON_KEY, CLAUDE_API_KEY, MAKE_WEBHOOK_URL, FB_PAGE_ID, FB_PAGE_ACCESS_TOKEN, FB_BRIDGEMATCH_PAGE_ID, FB_BRIDGEMATCH_PAGE_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, REVIEW_UI_PASSWORD, PORT
 
-## External accounts status:
-- Facebook: LIVE (posting via Make.com works)
-- LinkedIn: Developer app created, verification done, Community Management API requested (pending review ~1-2 weeks)
-- TikTok: PARKED (needs demo video of working integration before review — build first, submit later)
-- Make.com: Working, free tier, webhook URL in .env
+## External accounts:
+- Facebook: LIVE — direct Graph API posting, permanent tokens, both pages
+- LinkedIn: Developer app created, Community Management API pending review
+- TikTok: PARKED
+- Make.com: Free tier exhausted, no longer needed for Facebook
+- Railway: Hobby plan ($5/mo), ready to deploy

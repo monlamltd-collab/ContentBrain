@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
 const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById } = require('./lib/supabase');
-const { publishToMake } = require('./lib/publish');
+const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
 const { saveBrief, insertPost } = require('./lib/supabase');
 
@@ -13,6 +13,9 @@ const PASSWORD = process.env.REVIEW_UI_PASSWORD;
 
 app.use(express.json());
 app.use('/output', express.static(path.join(__dirname, 'output')));
+
+// Health check (no auth — used by Railway)
+app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ── AUTH MIDDLEWARE ──
 function requireAuth(req, res, next) {
@@ -193,18 +196,40 @@ function escapeHtml(str) {
 
 // ── CRON JOBS ──
 
-// Generate new content daily at 7am
-cron.schedule('0 7 * * *', async () => {
+// Track last generation date to avoid duplicates after PC wake
+let lastGenerateDate = null;
+
+// Generate new content daily at 7am (with wake-up resilience)
+cron.schedule('0 7 * * *', runGenerate);
+
+// Check on wake — if we missed today's generation, run it now
+cron.schedule('*/30 * * * *', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const hour = new Date().getHours();
+  if (hour >= 7 && lastGenerateDate !== today) {
+    console.log(`[${new Date().toISOString()}] Wake recovery: missed today's generation, running now...`);
+    await runGenerate();
+  }
+});
+
+async function runGenerate() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastGenerateDate === today) {
+    console.log(`[${new Date().toISOString()}] Cron: already generated today, skipping.`);
+    return;
+  }
+  lastGenerateDate = today;
+
   console.log(`[${new Date().toISOString()}] Cron: generating content...`);
   try {
     const { generateBatch } = require('./lib/generate');
     const { renderPost } = require('./lib/renderer');
     const { renderVideo } = require('./lib/video-renderer');
     const { insertPost } = require('./lib/supabase');
-    const { sendNotification } = require('./lib/telegram');
 
     const posts = await generateBatch();
     const savedPosts = [];
+    const failedSends = [];
 
     for (const post of posts) {
       try {
@@ -240,17 +265,28 @@ cron.schedule('0 7 * * *', async () => {
         savedPosts.push(saved);
 
         // Send to Telegram with video preview + approve/reject buttons
-        await sendPostForReview(saved);
+        const result = await sendPostForReview(saved);
+        if (!result.ok) {
+          failedSends.push({ id: saved.id, error: result.error });
+        }
       } catch (err) {
         console.error(`  Error processing ${post.brand}/${post.template_type}: ${err.message}`);
       }
     }
 
-    console.log(`[${new Date().toISOString()}] Cron: ${savedPosts.length} posts generated and sent to Telegram.`);
+    const msg = `${savedPosts.length} posts generated` +
+      (failedSends.length ? ` (${failedSends.length} failed to send to Telegram)` : '');
+    console.log(`[${new Date().toISOString()}] Cron: ${msg}`);
+
+    // If any Telegram sends failed, send a summary notification
+    if (failedSends.length) {
+      await sendNotification(`Generated ${savedPosts.length} posts but ${failedSends.length} failed to send previews. Check the review UI to approve them.`);
+    }
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Cron generate error:`, err.message);
+    await sendNotification(`Content generation failed: ${err.message}`);
   }
-});
+}
 
 // Publish approved posts every 15 minutes
 cron.schedule('*/15 * * * *', async () => {
@@ -261,11 +297,13 @@ cron.schedule('*/15 * * * *', async () => {
     console.log(`[${new Date().toISOString()}] Cron: publishing ${posts.length} approved posts...`);
     for (const post of posts) {
       try {
-        await publishToMake(post);
+        await publish(post);
         await updatePostStatus(post.id, 'published');
         console.log(`  Published: ${post.id} (${post.brand}/${post.platform})`);
       } catch (err) {
         console.error(`  Error publishing ${post.id}: ${err.message}`);
+        // Notify on publish failure so it doesn't silently fail
+        await sendNotification(`Failed to publish ${post.brand}/${post.template_type}: ${err.message.slice(0, 100)}`);
       }
     }
   } catch (err) {
@@ -426,7 +464,7 @@ async function pollTelegram() {
           const rev = pendingRevision;
           pendingRevision = null;
           try {
-            await sendNotification('Revising...');
+            await sendNotification('Interpreting your feedback...');
             const post = await getPostById(rev.postId);
 
             const Anthropic = require('@anthropic-ai/sdk');
@@ -434,18 +472,64 @@ async function pollTelegram() {
             const { brands } = require('./lib/config');
             const b = brands[post.brand] || brands.auctionbrain;
 
-            const response = await anthropic.messages.create({
+            // Step 1: Classify the feedback — what kind of change is needed?
+            const classifyResponse = await anthropic.messages.create({
               model: 'claude-haiku-4-5-20251001',
-              max_tokens: 500,
-              messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nThe content owner wants this change: "${text}"\n\nRewrite the post incorporating their feedback. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
+              max_tokens: 300,
+              messages: [{ role: 'user', content: `You manage a social media content pipeline. A post has a graphic/video and this copy:
+
+Headline: ${post.copy_headline}
+Body: ${post.copy_body}
+CTA: ${post.copy_cta}
+Template: ${post.template_type}
+Has video: ${!!post.video_url}
+
+The content owner sent this revision request: "${text}"
+
+Classify this request. Return JSON:
+{
+  "type": "copy_change" | "video_change" | "both" | "cannot_do",
+  "copy_action": "rewrite" | "none",
+  "video_action": "re-render" | "extend_duration" | "none",
+  "video_duration_seconds": null or number if they specified a duration,
+  "summary": "One line explaining what you understood they want",
+  "copy_instructions": "Specific instructions for rewriting copy, or null"
+}` }]
             });
 
-            const aiText = response.content[0].text;
-            const match = aiText.match(/\{[\s\S]*\}/);
-            if (!match) throw new Error('No JSON in Claude response');
-            const revised = JSON.parse(match[0]);
+            const classText = classifyResponse.content[0].text;
+            const classMatch = classText.match(/\{[\s\S]*\}/);
+            if (!classMatch) throw new Error('Could not interpret feedback');
+            const classification = JSON.parse(classMatch[0]);
 
-            // Update the post in Supabase
+            console.log(`[Telegram] Revision classified: ${classification.type} — ${classification.summary}`);
+            await sendNotification(`Understood: ${classification.summary}`);
+
+            let revised = { copy_headline: post.copy_headline, copy_body: post.copy_body, copy_cta: post.copy_cta };
+            let needsVideoRerender = false;
+            let videoDuration = null;
+
+            // Step 2: Handle copy changes
+            if (classification.copy_action === 'rewrite') {
+              const copyInstructions = classification.copy_instructions || text;
+              const copyResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 500,
+                messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nRevision needed: ${copyInstructions}\n\nRewrite the post. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
+              });
+
+              const aiText = copyResponse.content[0].text;
+              const match = aiText.match(/\{[\s\S]*\}/);
+              if (match) revised = JSON.parse(match[0]);
+            }
+
+            // Step 3: Handle video changes
+            if (classification.video_action === 'extend_duration' || classification.video_action === 're-render') {
+              needsVideoRerender = true;
+              videoDuration = classification.video_duration_seconds || 30;
+            }
+
+            // Apply copy changes
             const { supabase } = require('./lib/supabase');
             await supabase.from('posts').update({
               copy_headline: revised.copy_headline,
@@ -453,9 +537,32 @@ async function pollTelegram() {
               copy_cta: revised.copy_cta || ''
             }).eq('id', rev.postId);
 
+            // Re-render video if needed
+            if (needsVideoRerender && post.video_url) {
+              try {
+                await sendNotification(`Re-rendering video (${videoDuration}s)...`);
+                const { renderVideo, ensureBundle } = require('./lib/video-renderer');
+                await ensureBundle();
+
+                const updatedPost = {
+                  ...post,
+                  ...revised,
+                  overrideDurationSeconds: videoDuration,
+                };
+                const video = await renderVideo(post.template_type, post.brand, updatedPost);
+
+                await supabase.from('posts').update({ video_url: video.filename }).eq('id', rev.postId);
+                post.video_url = video.filename;
+                console.log(`[Telegram] Re-rendered video: ${video.filename} (${videoDuration}s)`);
+              } catch (videoErr) {
+                console.error(`[Telegram] Video re-render failed: ${videoErr.message}`);
+                await sendNotification(`Video re-render failed: ${videoErr.message}. Copy was updated.`);
+              }
+            }
+
             // Send revised post for review
             await sendPostForReview({ ...post, ...revised });
-            console.log(`[Telegram] Post ${rev.postId} revised`);
+            console.log(`[Telegram] Post ${rev.postId} revised (${classification.type})`);
           } catch (err) {
             console.error(`[Telegram] Revision error: ${err.message}`);
             await sendNotification(`Revision failed: ${err.message}`);
@@ -522,11 +629,12 @@ async function pollTelegram() {
             let published = 0;
             for (const post of approved) {
               try {
-                await publishToMake(post);
+                await publish(post);
                 await updatePostStatus(post.id, 'published');
                 published++;
               } catch (err) {
                 console.error(`  Error publishing ${post.id}: ${err.message}`);
+                await sendNotification(`Failed: ${post.brand}/${post.template_type} — ${err.message.slice(0, 100)}`);
               }
             }
             await sendNotification(`Done — ${published}/${approved.length} posts published.`);
@@ -543,11 +651,13 @@ async function pollTelegram() {
             const approved = await getApprovedPosts();
             const { getPendingBriefs } = require('./lib/supabase');
             const briefs = await getPendingBriefs();
+            const pubMethod = process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED';
             await sendNotification(
               `<b>ContentBrain Status</b>\n\n` +
               `Drafts awaiting review: ${drafts.length}\n` +
               `Approved (ready to publish): ${approved.length}\n` +
-              `Pending briefs: ${briefs.length}`
+              `Pending briefs: ${briefs.length}\n` +
+              `Publishing via: ${pubMethod}`
             );
           } catch (err) {
             await sendNotification(`Status check failed: ${err.message}`);
@@ -589,9 +699,19 @@ async function pollTelegram() {
 }
 
 // ── START ──
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`ContentBrain review UI running on port ${PORT}`);
   console.log('Cron: generate at 7am daily, publish every 15 mins');
   console.log('Telegram: polling for approve/reject buttons');
+
+  // Notify on startup so you know the server is alive
+  const drafts = await getDraftPosts().catch(() => []);
+  const approved = await getApprovedPosts().catch(() => []);
+  await sendNotification(
+    `<b>ContentBrain started</b>\n\n` +
+    `Drafts: ${drafts.length} | Approved: ${approved.length}\n` +
+    `Publishing: ${process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED'}`
+  );
+
   pollTelegram();
 });
