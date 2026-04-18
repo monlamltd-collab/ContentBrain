@@ -681,13 +681,165 @@ Classify this request. Return JSON:
         // Unknown command
         if (text.startsWith('/')) continue;
 
-        // Content brief
+        // Smart intent classification — route message to the right action
         try {
-          await saveBrief(text);
-          await sendNotification(`Noted — I'll work this into tomorrow's posts:\n\n<i>"${text}"</i>`);
-          console.log(`[Telegram] Brief saved: ${text.slice(0, 50)}...`);
+          const Anthropic = require('@anthropic-ai/sdk');
+          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+          // Get recent drafts for context
+          const recentDrafts = await getDraftPosts().catch(() => []);
+          const draftsContext = recentDrafts.slice(0, 5).map(p =>
+            `- ID:${p.id} | ${p.brand}/${p.template_type} | "${p.copy_headline}" | has_video:${!!p.video_url}`
+          ).join('\n');
+
+          const intentResponse = await anthropic.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 300,
+            messages: [{ role: 'user', content: `You are a social media content assistant. The content owner sent this message via Telegram:
+
+"${text}"
+
+Current draft posts awaiting review:
+${draftsContext || '(none)'}
+
+Classify this message. Return JSON:
+{
+  "intent": "revise_post" | "content_brief" | "question" | "general_chat",
+  "post_id": "the post ID if they're referring to a specific post, or the most likely draft if it's a revision, or null",
+  "summary": "One line explaining what you think they want",
+  "reply": "A short, helpful reply if this is a question or general chat (null otherwise)"
+}
+
+Rules:
+- If they're giving feedback about a post (e.g. "make the words slower", "change the headline", "too long"), that's "revise_post"
+- If they're suggesting topics or ideas for future posts, that's "content_brief"
+- If they're asking about status, how something works, etc, that's "question"
+- When in doubt between revise_post and content_brief, prefer revise_post if there are active drafts` }]
+          });
+
+          const intentText = intentResponse.content[0].text;
+          const intentMatch = intentText.match(/\{[\s\S]*\}/);
+          if (!intentMatch) throw new Error('Could not classify message');
+          const intent = JSON.parse(intentMatch[0]);
+
+          console.log(`[Telegram] Intent: ${intent.intent} — ${intent.summary}`);
+
+          if (intent.intent === 'revise_post' && intent.post_id) {
+            // Route to revision flow — simulate pressing the Revise button
+            pendingRevision = { postId: intent.post_id, chatId: msg.chat.id, messageId: msg.message_id };
+            // Re-inject the message as revision feedback by processing it immediately
+            const rev = pendingRevision;
+            pendingRevision = null;
+
+            await sendNotification(`Revising post — ${intent.summary}`);
+            const post = await getPostById(rev.postId);
+            if (!post) {
+              await sendNotification(`Couldn't find that post. Use the Revise button on a specific post, or try again.`);
+              continue;
+            }
+
+            const { brands } = require('./lib/config');
+            const b = brands[post.brand] || brands.auctionbrain;
+
+            const classifyResponse = await anthropic.messages.create({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 300,
+              messages: [{ role: 'user', content: `You manage a social media content pipeline. A post has a graphic/video and this copy:
+
+Headline: ${post.copy_headline}
+Body: ${post.copy_body}
+CTA: ${post.copy_cta}
+Template: ${post.template_type}
+Has video: ${!!post.video_url}
+
+The content owner sent this revision request: "${text}"
+
+Classify this request. Return JSON:
+{
+  "type": "copy_change" | "video_change" | "both" | "cannot_do",
+  "copy_action": "rewrite" | "none",
+  "video_action": "re-render" | "extend_duration" | "none",
+  "video_duration_seconds": null or number if they specified a duration,
+  "summary": "One line explaining what you understood they want",
+  "copy_instructions": "Specific instructions for rewriting copy, or null"
+}` }]
+            });
+
+            const classText = classifyResponse.content[0].text;
+            const classMatch = classText.match(/\{[\s\S]*\}/);
+            if (!classMatch) throw new Error('Could not interpret feedback');
+            const classification = JSON.parse(classMatch[0]);
+
+            await sendNotification(`Understood: ${classification.summary}`);
+
+            let revised = { copy_headline: post.copy_headline, copy_body: post.copy_body, copy_cta: post.copy_cta };
+            let needsVideoRerender = false;
+            let videoDuration = null;
+
+            if (classification.copy_action === 'rewrite') {
+              const copyInstructions = classification.copy_instructions || text;
+              const copyResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 500,
+                messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nRevision needed: ${copyInstructions}\n\nRewrite the post. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
+              });
+              const aiText = copyResponse.content[0].text;
+              const match = aiText.match(/\{[\s\S]*\}/);
+              if (match) revised = JSON.parse(match[0]);
+            }
+
+            if (classification.video_action === 'extend_duration' || classification.video_action === 're-render') {
+              needsVideoRerender = true;
+              videoDuration = classification.video_duration_seconds || 30;
+            }
+
+            const { supabase } = require('./lib/supabase');
+            await supabase.from('posts').update({
+              copy_headline: revised.copy_headline,
+              copy_body: revised.copy_body || '',
+              copy_cta: revised.copy_cta || ''
+            }).eq('id', rev.postId);
+
+            if (needsVideoRerender && post.video_url) {
+              try {
+                await sendNotification(`Re-rendering video (${videoDuration}s)...`);
+                const { renderVideo, ensureBundle } = require('./lib/video-renderer');
+                await ensureBundle();
+                const updatedPost = { ...post, ...revised, overrideDurationSeconds: videoDuration };
+                const video = await renderVideo(post.template_type, post.brand, updatedPost);
+                await supabase.from('posts').update({ video_url: video.filename }).eq('id', rev.postId);
+                post.video_url = video.filename;
+              } catch (videoErr) {
+                console.error(`[Telegram] Video re-render failed: ${videoErr.message}`);
+                await sendNotification(`Video re-render failed: ${videoErr.message}. Copy was updated.`);
+              }
+            }
+
+            await sendPostForReview({ ...post, ...revised });
+            console.log(`[Telegram] Smart revision: post ${rev.postId} (${classification.type})`);
+
+          } else if (intent.intent === 'revise_post' && !intent.post_id) {
+            await sendNotification(`I think you want to revise a post but I'm not sure which one. Tap the Revise button on the post you want to change, then send your feedback.`);
+
+          } else if (intent.intent === 'question' || intent.intent === 'general_chat') {
+            const reply = intent.reply || `I'm not sure how to help with that. Try /help for available commands.`;
+            await sendNotification(reply);
+
+          } else {
+            // content_brief
+            await saveBrief(text);
+            await sendNotification(`Noted — I'll work this into tomorrow's posts:\n\n<i>"${text}"</i>`);
+            console.log(`[Telegram] Brief saved: ${text.slice(0, 50)}...`);
+          }
         } catch (err) {
-          console.error(`[Telegram] Error saving brief: ${err.message}`);
+          console.error(`[Telegram] Smart routing error: ${err.message}`);
+          // Fall back to saving as brief
+          try {
+            await saveBrief(text);
+            await sendNotification(`Saved as a brief for tomorrow's posts:\n\n<i>"${text}"</i>`);
+          } catch (briefErr) {
+            console.error(`[Telegram] Brief fallback error: ${briefErr.message}`);
+          }
         }
       }
     }
