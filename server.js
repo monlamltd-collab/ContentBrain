@@ -2,10 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
-const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById } = require('./lib/supabase');
+const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
-const { saveBrief, insertPost } = require('./lib/supabase');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -490,6 +489,66 @@ async function pollTelegram() {
         continue;
       }
 
+      // Handle photo uploads — extract text/key points and save as content seed
+      if (msg && msg.photo && String(msg.chat.id) === String(CHAT_ID)) {
+        try {
+          await sendNotification('Got that image — extracting content...');
+
+          // Get highest resolution photo
+          const photo = msg.photo[msg.photo.length - 1];
+          const fileId = photo.file_id;
+          const userCaption = msg.caption || '';
+
+          // Download from Telegram
+          const imgFilename = `seed-photo-${Date.now()}.jpg`;
+          await downloadTelegramFile(fileId, imgFilename);
+          const imgPath = path.join(__dirname, 'output', imgFilename);
+
+          // Read image and send to Claude Vision
+          const fs = require('fs');
+          const imageData = fs.readFileSync(imgPath).toString('base64');
+
+          const Anthropic = require('@anthropic-ai/sdk');
+          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+          const visionResponse = await anthropic.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 800,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: imageData } },
+                { type: 'text', text: `Extract all text and key points from this image. It's likely a photo of an article, screenshot, or document.${userCaption ? ` The sender added this note: "${userCaption}"` : ''}\n\nReturn JSON:\n{\n  "extracted_text": "All readable text from the image",\n  "summary": "One-line summary of what this is about",\n  "key_points": "3-5 bullet points of the most useful info",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "tags": ["tag1", "tag2"]\n}` }
+              ]
+            }]
+          });
+
+          const visionText = visionResponse.content[0].text;
+          const visionMatch = visionText.match(/\{[\s\S]*\}/);
+          const extracted = visionMatch ? JSON.parse(visionMatch[0]) : { extracted_text: '', summary: 'Could not extract content', key_points: '', tags: [] };
+
+          await saveSeed({
+            source: 'telegram_photo',
+            raw_input: userCaption || null,
+            extracted_text: extracted.extracted_text || '',
+            summary: extracted.summary || '',
+            key_points: extracted.key_points || '',
+            brand: extracted.brand || null,
+            tags: extracted.tags || []
+          });
+
+          // Clean up image file
+          if (fs.existsSync(imgPath)) fs.unlinkSync(imgPath);
+
+          await sendNotification(`Got it — extracted from that image: "${extracted.summary}". Saved for future content.`);
+          console.log(`[Telegram] Photo seed saved: ${extracted.summary}`);
+        } catch (err) {
+          console.error(`[Telegram] Error processing photo: ${err.message}`);
+          await sendNotification(`Error processing that image: ${err.message}`);
+        }
+        continue;
+      }
+
       // Handle text messages
       if (msg && msg.text && String(msg.chat.id) === String(CHAT_ID)) {
         const text = msg.text.trim();
@@ -794,7 +853,7 @@ Classify this request. Return JSON:
             `/publish — publish all approved posts now\n` +
             `/status — check drafts, approved, briefs\n` +
             `/help — show this message\n\n` +
-            `Or just send a text message to brief tomorrow's posts, or send a video to create a watermarked post.`
+            `Or just chat — send text ideas, photos of articles, or URLs and I'll save them as content seeds for future posts. Send a video to create a watermarked post.`
           );
           continue;
         }
@@ -829,8 +888,9 @@ ${draftsContext || '(none)'}
 Respond naturally as a helpful assistant. Return JSON:
 {
   "reply": "Your conversational response to the owner",
-  "action": "revise_post" | "save_brief" | null,
+  "action": "revise_post" | "save_brief" | "save_seed" | "scrape_url" | null,
   "post_id": "only if action is revise_post — the draft ID they're referring to, or null",
+  "url": "only if action is scrape_url — the URL to scrape",
   "summary": "one-line summary of what they want (only if action is not null)"
 }
 
@@ -838,6 +898,8 @@ Guidelines:
 - MOST messages need no action — just reply naturally. Chat, answer questions, be helpful.
 - Only set action to "save_brief" if the owner is CLEARLY giving you a specific topic or idea for future posts (e.g. "do a post about bridging loan rates rising")
 - Only set action to "revise_post" if they're giving specific feedback on a draft (e.g. "make the headline shorter", "change the CTA")
+- Set action to "save_seed" if the owner is sharing research, knowledge, facts, or article content — not a direct social brief but useful raw material for future content
+- Set action to "scrape_url" if the message contains a URL they want you to read and store (e.g. "read this: https://...")
 - When in doubt, just reply — don't trigger an action. It's always better to chat than to wrongly save a brief or revise a post.
 - Keep replies short, friendly, British English.` }]
           });
@@ -968,6 +1030,107 @@ Classify this request. Return JSON:
               await sendNotification(`Saved as a brief for tomorrow's posts.`);
             }
             console.log(`[Telegram] Brief conversation started: ${text.slice(0, 50)}...`);
+
+          } else if (intent.action === 'save_seed') {
+            // Save as content seed — raw material, not a direct brief
+            try {
+              const seedResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 400,
+                messages: [{ role: 'user', content: `The content owner shared this knowledge/research:\n"${text}"\n\nExtract structured content seed. Return JSON:\n{\n  "summary": "One-line summary",\n  "key_points": "3-5 bullet points of useful info",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "tags": ["tag1", "tag2"]\n}` }]
+              });
+
+              const seedText = seedResponse.content[0].text;
+              const seedMatch = seedText.match(/\{[\s\S]*\}/);
+              const seed = seedMatch ? JSON.parse(seedMatch[0]) : { summary: text.slice(0, 100), key_points: '', tags: [] };
+
+              await saveSeed({
+                source: 'telegram_text',
+                raw_input: text,
+                summary: seed.summary || '',
+                key_points: seed.key_points || '',
+                brand: seed.brand || null,
+                tags: seed.tags || []
+              });
+
+              console.log(`[Telegram] Text seed saved: ${seed.summary}`);
+            } catch (seedErr) {
+              console.error(`[Telegram] Seed save error: ${seedErr.message}`);
+              // Still save raw text
+              await saveSeed({ source: 'telegram_text', raw_input: text, summary: text.slice(0, 200) });
+            }
+
+          } else if (intent.action === 'scrape_url' && intent.url) {
+            // Scrape URL and save as content seed
+            try {
+              const urlToScrape = intent.url;
+
+              // Validate URL — only allow http/https to prevent SSRF
+              let parsedUrl;
+              try {
+                parsedUrl = new URL(urlToScrape);
+              } catch {
+                await sendNotification(`That doesn't look like a valid URL.`);
+                continue;
+              }
+              if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+                await sendNotification(`Only http/https URLs are supported.`);
+                continue;
+              }
+
+              let pageContent = '';
+
+              // Fetch the page content
+              const pageRes = await fetch(parsedUrl.href, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ContentBrain/1.0)' },
+                signal: AbortSignal.timeout(15000)
+              });
+              if (pageRes.ok) {
+                const html = await pageRes.text();
+                // Strip HTML tags for a rough text extraction
+                pageContent = html
+                  .replace(/<script[\s\S]*?<\/script>/gi, '')
+                  .replace(/<style[\s\S]*?<\/style>/gi, '')
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .slice(0, 8000);
+              }
+
+              if (!pageContent) {
+                await sendNotification(`Couldn't read that URL. The page may be behind a paywall or blocking bots.`);
+                continue;
+              }
+
+              // Summarise with Claude
+              const scrapeResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 600,
+                messages: [{ role: 'user', content: `Summarise this article content for a UK property content team. Source URL: ${urlToScrape}\n\nContent:\n${pageContent.slice(0, 6000)}\n\nReturn JSON:\n{\n  "summary": "One-line summary",\n  "key_points": "3-5 bullet points of the most useful info",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "tags": ["tag1", "tag2"]\n}` }]
+              });
+
+              const scrapeText = scrapeResponse.content[0].text;
+              const scrapeMatch = scrapeText.match(/\{[\s\S]*\}/);
+              const scraped = scrapeMatch ? JSON.parse(scrapeMatch[0]) : { summary: 'Could not summarise', key_points: '', tags: [] };
+
+              await saveSeed({
+                source: 'telegram_url',
+                raw_input: urlToScrape,
+                extracted_text: pageContent.slice(0, 5000),
+                summary: scraped.summary || '',
+                key_points: scraped.key_points || '',
+                brand: scraped.brand || null,
+                tags: scraped.tags || []
+              });
+
+              await sendNotification(`Read that article — ${scraped.summary}. Saved for future content.`);
+              console.log(`[Telegram] URL seed saved: ${urlToScrape}`);
+            } catch (scrapeErr) {
+              console.error(`[Telegram] URL scrape error: ${scrapeErr.message}`);
+              // Save the URL as a raw seed even if scraping failed
+              await saveSeed({ source: 'telegram_url', raw_input: intent.url, summary: 'Scrape failed — URL saved for manual review' });
+              await sendNotification(`Couldn't fully read that page, but I've saved the URL for later.`);
+            }
           }
           // No else needed — conversational reply was already sent above
         } catch (err) {
