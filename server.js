@@ -2,9 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
-const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed } = require('./lib/supabase');
+const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
+const reviewRouter = require('./lib/review-api');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,6 +16,9 @@ app.use('/output', express.static(path.join(__dirname, 'output')));
 
 // Health check (no auth — used by Railway)
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+// Review API (auth via API key, not session cookie)
+app.use('/api', reviewRouter);
 
 // ── AUTH MIDDLEWARE ──
 function requireAuth(req, res, next) {
@@ -54,8 +58,12 @@ app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
 // ── DASHBOARD ──
 app.get('/', requireAuth, async (req, res) => {
   try {
-    const posts = await getDraftPosts();
-    res.send(dashboardPage(posts));
+    const filter = req.query.type || 'all';
+    const [socialPosts, blogPosts] = await Promise.all([
+      filter === 'blog' || filter === 'guide' ? Promise.resolve([]) : getDraftPosts(),
+      filter === 'social' ? Promise.resolve([]) : getDraftBlogPosts()
+    ]);
+    res.send(dashboardPage(socialPosts, blogPosts, filter));
   } catch (err) {
     res.status(500).send(`Error: ${err.message}`);
   }
@@ -74,6 +82,38 @@ app.post('/api/posts/:id/approve', requireAuth, async (req, res) => {
 app.post('/api/posts/:id/reject', requireAuth, async (req, res) => {
   try {
     const post = await updatePostStatus(req.params.id, 'rejected');
+    res.json({ ok: true, post });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── BLOG POST APPROVE / REJECT ──
+app.post('/api/blog-posts/:id/approve', requireAuth, async (req, res) => {
+  try {
+    const post = await updateBlogPostStatus(req.params.id, 'approved');
+    // Cross-pollinate: create a content seed from the approved blog
+    try {
+      await saveSeed({
+        source: 'blog_approved',
+        summary: `New blog: ${post.title}`,
+        key_points: post.summary || post.meta_description || '',
+        brand: post.brand || null,
+        tags: post.tags || []
+      });
+      console.log(`[Cross-pollinate] Seed created from blog: ${post.title}`);
+    } catch (seedErr) {
+      console.error(`[Cross-pollinate] Seed creation failed: ${seedErr.message}`);
+    }
+    res.json({ ok: true, post });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/blog-posts/:id/reject', requireAuth, async (req, res) => {
+  try {
+    const post = await updateBlogPostStatus(req.params.id, 'rejected');
     res.json({ ok: true, post });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -109,9 +149,9 @@ function loginPage(error) {
 </body></html>`;
 }
 
-function dashboardPage(posts) {
-  const cards = posts.map(post => `
-    <div class="card" id="card-${post.id}">
+function dashboardPage(socialPosts, blogPosts, filter) {
+  const socialCards = socialPosts.map(post => `
+    <div class="card" id="card-${post.id}" data-type="social">
       <div class="card-header">
         <span class="badge brand-${post.brand}">${post.brand}</span>
         <span class="badge platform">${post.platform}</span>
@@ -125,11 +165,44 @@ function dashboardPage(posts) {
         ${post.copy_cta ? `<p class="cta">${escapeHtml(post.copy_cta)}</p>` : ''}
       </div>
       <div class="actions">
-        <button class="btn approve" onclick="action('${post.id}','approve')">Approve</button>
-        <button class="btn reject" onclick="action('${post.id}','reject')">Reject</button>
+        <button class="btn approve" onclick="action('${post.id}','approve','social')">Approve</button>
+        <button class="btn reject" onclick="action('${post.id}','reject','social')">Reject</button>
       </div>
     </div>
   `).join('');
+
+  const filteredBlogPosts = (filter === 'blog') ? blogPosts.filter(p => (p.post_type || 'blog') === 'blog')
+    : (filter === 'guide') ? blogPosts.filter(p => p.post_type === 'guide')
+    : blogPosts;
+
+  const blogCards = filteredBlogPosts.map(post => {
+    const postType = post.post_type || 'blog';
+    const brandLabel = post.brand === 'bridgematch' ? 'bridgematch' : 'auctionbrain';
+    const preview = (post.summary || post.meta_description || '').slice(0, 200);
+    return `
+    <div class="card" id="card-${post.id}" data-type="${postType}">
+      <div class="card-header">
+        <span class="badge brand-${brandLabel}">${brandLabel}</span>
+        <span class="badge type-badge">${postType}</span>
+        ${post.evaluation_score ? `<span class="badge score">${post.evaluation_score}/10</span>` : ''}
+      </div>
+      <div class="copy">
+        <strong>${escapeHtml(post.title || '')}</strong>
+        ${post.word_count || post.content ? `<p class="meta-info">${post.content ? Math.round(post.content.split(/\\s+/).length) + ' words' : ''}</p>` : ''}
+        <p>${escapeHtml(preview)}</p>
+        ${post.tags && post.tags.length ? `<p class="tags">${post.tags.map(t => '#' + t).join(' ')}</p>` : ''}
+      </div>
+      <div class="actions">
+        <button class="btn approve" onclick="action('${post.id}','approve','blog')">Approve</button>
+        <button class="btn reject" onclick="action('${post.id}','reject','blog')">Reject</button>
+      </div>
+    </div>
+  `;
+  }).join('');
+
+  const totalCount = socialPosts.length + filteredBlogPosts.length;
+  const filterParam = (f) => f === 'all' ? '/' : `/?type=${f}`;
+  const activeClass = (f) => f === filter ? 'tab active' : 'tab';
 
   return `<!DOCTYPE html>
 <html><head>
@@ -139,7 +212,11 @@ function dashboardPage(posts) {
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; padding: 24px; }
   h1 { font-size: 28px; color: #1a2b4b; margin-bottom: 8px; }
-  .subtitle { color: #666; margin-bottom: 32px; }
+  .subtitle { color: #666; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
+  .tab { padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; text-decoration: none; color: #666; background: #e8e8e8; transition: all 0.2s; }
+  .tab:hover { background: #ddd; }
+  .tab.active { background: #1a2b4b; color: #faf8f4; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 24px; }
   .card { background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); transition: opacity 0.3s; }
   .card.done { opacity: 0.3; pointer-events: none; }
@@ -149,6 +226,8 @@ function dashboardPage(posts) {
   .brand-bridgematch { background: #0f8a5f; color: #fff; }
   .platform { background: #e8e8e8; color: #333; }
   .template { background: #fdf2e9; color: #C0392B; }
+  .type-badge { background: #e8f4fd; color: #1a6fb5; }
+  .score { background: #e8fdf0; color: #0f8a5f; }
   .preview { width: 100%; aspect-ratio: 1; object-fit: cover; }
   .video-wrap { position: relative; }
   .video-wrap video { width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
@@ -157,6 +236,8 @@ function dashboardPage(posts) {
   .copy strong { display: block; font-size: 18px; color: #1a2b4b; margin-bottom: 8px; }
   .copy p { color: #555; line-height: 1.5; margin-bottom: 8px; white-space: pre-line; }
   .copy .cta { color: #0f8a5f; font-weight: 500; }
+  .copy .meta-info { font-size: 13px; color: #999; }
+  .copy .tags { font-size: 12px; color: #888; }
   .actions { padding: 16px; display: flex; gap: 12px; border-top: 1px solid #eee; }
   .btn { flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
   .btn.approve { background: #0f8a5f; color: #fff; }
@@ -167,19 +248,25 @@ function dashboardPage(posts) {
 </style>
 </head><body>
   <h1>ContentBrain</h1>
-  <p class="subtitle">${posts.length} draft${posts.length !== 1 ? 's' : ''} awaiting review</p>
+  <p class="subtitle">${totalCount} draft${totalCount !== 1 ? 's' : ''} awaiting review</p>
+  <div class="tabs">
+    <a class="${activeClass('all')}" href="${filterParam('all')}">All</a>
+    <a class="${activeClass('social')}" href="${filterParam('social')}">Social</a>
+    <a class="${activeClass('blog')}" href="${filterParam('blog')}">Blog</a>
+    <a class="${activeClass('guide')}" href="${filterParam('guide')}">Guide</a>
+  </div>
   <div class="grid">
-    ${posts.length ? cards : '<div class="empty">No drafts to review. All clear.</div>'}
+    ${totalCount ? socialCards + blogCards : '<div class="empty">No drafts to review. All clear.</div>'}
   </div>
   <script>
-    async function action(id, type) {
+    async function action(id, type, contentKind) {
       const card = document.getElementById('card-' + id);
+      const endpoint = contentKind === 'blog' ? '/api/blog-posts/' : '/api/posts/';
       try {
-        const res = await fetch('/api/posts/' + id + '/' + type, { method: 'POST' });
+        const res = await fetch(endpoint + id + '/' + type, { method: 'POST' });
         if (res.ok) {
           card.classList.add('done');
           setTimeout(() => card.remove(), 500);
-          // Update count
           const remaining = document.querySelectorAll('.card:not(.done)').length;
           document.querySelector('.subtitle').textContent = remaining + ' draft' + (remaining !== 1 ? 's' : '') + ' awaiting review';
         }
@@ -365,8 +452,59 @@ async function pollTelegram() {
       // Handle approve/reject button presses
       const cb = update.callback_query;
       if (cb && cb.data) {
-        // Support both prefixed (cb:approve:id) and legacy (approve:id) formats
         const parts = cb.data.split(':');
+
+        // rv:<type>:<action>:<id> — review hub callbacks (blog/guide from generators)
+        if (parts.length === 4 && parts[0] === 'rv') {
+          const contentType = parts[1]; // blog, guide, social
+          const rvAction = parts[2];    // approve, reject, revise
+          const rvId = parts[3];
+
+          if (rvId && ['approve', 'reject'].includes(rvAction)) {
+            try {
+              const status = rvAction === 'approve' ? 'approved' : 'rejected';
+              await updateBlogPostStatus(rvId, status);
+
+              const emoji = rvAction === 'approve' ? 'APPROVED' : 'REJECTED';
+              const originalCaption = cb.message?.caption || cb.message?.text || '';
+              await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\n${emoji}`);
+              await answerCallback(cb.id, `${contentType} ${status}`);
+
+              // Cross-pollinate: create seed from approved blog/guide
+              if (rvAction === 'approve') {
+                try {
+                  const blogPost = await getBlogPostById(rvId);
+                  await saveSeed({
+                    source: 'blog_approved',
+                    summary: `New ${contentType}: ${blogPost.title}`,
+                    key_points: blogPost.summary || blogPost.meta_description || '',
+                    brand: blogPost.brand || null,
+                    tags: blogPost.tags || []
+                  });
+                  console.log(`[Cross-pollinate] Seed created from ${contentType}: ${blogPost.title}`);
+                } catch (seedErr) {
+                  console.error(`[Cross-pollinate] Seed creation failed: ${seedErr.message}`);
+                }
+              }
+
+              console.log(`[Telegram] ${contentType} ${rvId} ${status}`);
+            } catch (err) {
+              console.error(`[Telegram] Error handling rv callback: ${err.message}`);
+              await answerCallback(cb.id, 'Error — try again');
+            }
+          }
+
+          if (rvId && rvAction === 'revise') {
+            pendingRevision = { postId: rvId, chatId: cb.message.chat.id, messageId: cb.message.message_id, contentType };
+            await answerCallback(cb.id, 'Send your feedback');
+            await sendNotification('What would you like changed? Reply with your feedback.');
+            console.log(`[Telegram] Revision requested for ${contentType} ${rvId}`);
+          }
+
+          continue;
+        }
+
+        // cb:<action>:<id> or legacy <action>:<id> — social post callbacks
         let action, postId;
         if (parts.length === 3 && parts[0] === 'cb') {
           action = parts[1];
