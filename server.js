@@ -297,9 +297,14 @@ cron.schedule('*/15 * * * *', async () => {
     console.log(`[${new Date().toISOString()}] Cron: publishing ${posts.length} approved posts...`);
     for (const post of posts) {
       try {
-        await publish(post);
+        const result = await publish(post);
         await updatePostStatus(post.id, 'published');
-        console.log(`  Published: ${post.id} (${post.brand}/${post.platform})`);
+        // Store Facebook post ID for insights tracking
+        if (result.postId) {
+          const { supabase } = require('./lib/supabase');
+          await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id).catch(() => {});
+        }
+        console.log(`  Published: ${post.id} (${post.brand}/${post.platform}) fb:${result.postId || 'n/a'}`);
       } catch (err) {
         console.error(`  Error publishing ${post.id}: ${err.message}`);
         // Notify on publish failure so it doesn't silently fail
@@ -308,6 +313,19 @@ cron.schedule('*/15 * * * *', async () => {
     }
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Cron publish error:`, err.message);
+  }
+});
+
+// Collect Facebook insights daily at 8pm (gives posts time to accumulate engagement)
+cron.schedule('0 20 * * *', async () => {
+  try {
+    const { collectInsights } = require('./lib/insights');
+    const result = await collectInsights();
+    if (result.fetched > 0) {
+      console.log(`[${new Date().toISOString()}] Insights: fetched metrics for ${result.fetched}/${result.total} posts`);
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Insights cron error: ${err.message}`);
   }
 });
 
