@@ -1115,7 +1115,7 @@ Classify this request. Return JSON:
 
               await saveSeed({
                 source: 'telegram_url',
-                raw_input: urlToScrape,
+                raw_input: text,  // full message including user commentary + URL
                 extracted_text: pageContent.slice(0, 5000),
                 summary: scraped.summary || '',
                 key_points: scraped.key_points || '',
