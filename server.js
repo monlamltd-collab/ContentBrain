@@ -316,6 +316,23 @@ cron.schedule('*/15 * * * *', async () => {
 
 let telegramOffset = 0;
 let pendingRevision = null; // { postId, messageId, chatId }
+let pendingBrief = null; // { messages: [], startedAt: number }
+
+// ── CHAT MEMORY ──
+const chatHistory = [];
+const MAX_HISTORY = 10;
+
+function addToHistory(role, text) {
+  chatHistory.push({ role, text, timestamp: Date.now() });
+  if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
+}
+
+function getHistoryContext() {
+  if (!chatHistory.length) return '';
+  return 'RECENT CONVERSATION:\n' + chatHistory.map(m =>
+    `${m.role === 'user' ? 'Owner' : 'ContentBrain'}: ${m.text}`
+  ).join('\n') + '\n\n';
+}
 
 async function pollTelegram() {
   if (!BOT_TOKEN) return;
@@ -467,6 +484,10 @@ async function pollTelegram() {
             await sendNotification('Interpreting your feedback...');
             const post = await getPostById(rev.postId);
 
+            // Store feedback for rejection learning (even if post gets revised and approved)
+            const { supabase: sb } = require('./lib/supabase');
+            await sb.from('posts').update({ rejection_feedback: text }).eq('id', rev.postId).catch(() => {});
+
             const Anthropic = require('@anthropic-ai/sdk');
             const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
             const { brands } = require('./lib/config');
@@ -568,6 +589,88 @@ Classify this request. Return JSON:
             await sendNotification(`Revision failed: ${err.message}`);
           }
           continue;
+        }
+
+        // Handle pending brief conversation
+        if (pendingBrief && !text.startsWith('/')) {
+          const cancel = text.toLowerCase().match(/^(cancel|never ?mind|forget it|nah|skip)$/);
+          if (cancel) {
+            pendingBrief = null;
+            const reply = 'No worries, brief cancelled.';
+            await sendNotification(reply);
+            addToHistory('user', text);
+            addToHistory('assistant', reply);
+            continue;
+          }
+
+          pendingBrief.messages.push(text);
+          addToHistory('user', text);
+
+          // After 2 messages from user (initial + follow-up), extract and save
+          if (pendingBrief.messages.length >= 2) {
+            try {
+              const Anthropic = require('@anthropic-ai/sdk');
+              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+              const extractResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 400,
+                messages: [{ role: 'user', content: `The content owner briefed a social media post across these messages:\n${pendingBrief.messages.map((m, i) => `Message ${i + 1}: "${m}"`).join('\n')}\n\nExtract a structured brief. Return JSON:\n{\n  "topic": "2-5 word topic summary",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "angle": "The specific angle or hook to take",\n  "data_points": "Any stats, facts, or stories mentioned, or null",\n  "full_brief": "A single paragraph combining all the info into a clear content brief"\n}` }]
+              });
+
+              const extractText = extractResponse.content[0].text;
+              const extractMatch = extractText.match(/\{[\s\S]*\}/);
+              if (!extractMatch) throw new Error('Could not parse brief');
+              const structured = JSON.parse(extractMatch[0]);
+
+              const { saveBrief } = require('./lib/supabase');
+              await saveBrief(structured);
+
+              const reply = `Got it — saved a brief about "${structured.topic}"${structured.brand ? ` for ${structured.brand}` : ''}. I'll work it into tomorrow's posts.`;
+              await sendNotification(reply);
+              addToHistory('assistant', reply);
+              console.log(`[Telegram] Structured brief saved: ${structured.topic}`);
+            } catch (err) {
+              console.error(`[Telegram] Brief extraction error: ${err.message}`);
+              const { saveBrief } = require('./lib/supabase');
+              await saveBrief(pendingBrief.messages.join(' '));
+              const reply = 'Saved your brief for tomorrow.';
+              await sendNotification(reply);
+              addToHistory('assistant', reply);
+            }
+            pendingBrief = null;
+          } else {
+            // Ask one follow-up question
+            try {
+              const Anthropic = require('@anthropic-ai/sdk');
+              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+              const followUpResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 150,
+                messages: [{ role: 'user', content: `You are ContentBrain. The content owner wants to brief a future social media post.\n\nThey said: "${pendingBrief.messages.join(' ')}"\n\nAsk ONE short follow-up question to make this brief more actionable. Focus on: what angle or hook? Any specific data points or stories to include? Which brand (AuctionBrain or BridgeMatch)?\n\nKeep it casual, one sentence. British English.` }]
+              });
+
+              const reply = followUpResponse.content[0].text.trim();
+              await sendNotification(reply);
+              addToHistory('assistant', reply);
+            } catch (err) {
+              // If follow-up fails, just save what we have
+              const { saveBrief } = require('./lib/supabase');
+              await saveBrief(pendingBrief.messages.join(' '));
+              pendingBrief = null;
+              await sendNotification('Saved your brief for tomorrow.');
+            }
+          }
+          continue;
+        }
+
+        // Timeout pending brief after 10 minutes
+        if (pendingBrief && Date.now() - pendingBrief.startedAt > 10 * 60 * 1000) {
+          const { saveBrief } = require('./lib/supabase');
+          await saveBrief(pendingBrief.messages.join(' '));
+          pendingBrief = null;
+          console.log('[Telegram] Brief timed out, saved as-is');
         }
 
         // /generate — create new posts now
@@ -692,29 +795,33 @@ Classify this request. Return JSON:
             `- ID:${p.id} | ${p.brand}/${p.template_type} | "${p.copy_headline}" | has_video:${!!p.video_url}`
           ).join('\n');
 
+          addToHistory('user', text);
+
           const intentResponse = await anthropic.messages.create({
             model: 'claude-haiku-4-5-20251001',
-            max_tokens: 300,
-            messages: [{ role: 'user', content: `You are a social media content assistant. The content owner sent this message via Telegram:
+            max_tokens: 400,
+            messages: [{ role: 'user', content: `You are ContentBrain, a friendly social media content assistant on Telegram. You manage content generation and publishing for the owner's brands.
 
+${getHistoryContext()}The owner's latest message:
 "${text}"
 
 Current draft posts awaiting review:
 ${draftsContext || '(none)'}
 
-Classify this message. Return JSON:
+Respond naturally as a helpful assistant. Return JSON:
 {
-  "intent": "revise_post" | "content_brief" | "question" | "general_chat",
-  "post_id": "the post ID if they're referring to a specific post, or the most likely draft if it's a revision, or null",
-  "summary": "One line explaining what you think they want",
-  "reply": "A short, helpful reply if this is a question or general chat (null otherwise)"
+  "reply": "Your conversational response to the owner",
+  "action": "revise_post" | "save_brief" | null,
+  "post_id": "only if action is revise_post — the draft ID they're referring to, or null",
+  "summary": "one-line summary of what they want (only if action is not null)"
 }
 
-Rules:
-- If they're giving feedback about a post (e.g. "make the words slower", "change the headline", "too long"), that's "revise_post"
-- If they're suggesting topics or ideas for future posts, that's "content_brief"
-- If they're asking about status, how something works, etc, that's "question"
-- When in doubt between revise_post and content_brief, prefer revise_post if there are active drafts` }]
+Guidelines:
+- MOST messages need no action — just reply naturally. Chat, answer questions, be helpful.
+- Only set action to "save_brief" if the owner is CLEARLY giving you a specific topic or idea for future posts (e.g. "do a post about bridging loan rates rising")
+- Only set action to "revise_post" if they're giving specific feedback on a draft (e.g. "make the headline shorter", "change the CTA")
+- When in doubt, just reply — don't trigger an action. It's always better to chat than to wrongly save a brief or revise a post.
+- Keep replies short, friendly, British English.` }]
           });
 
           const intentText = intentResponse.content[0].text;
@@ -722,16 +829,19 @@ Rules:
           if (!intentMatch) throw new Error('Could not classify message');
           const intent = JSON.parse(intentMatch[0]);
 
-          console.log(`[Telegram] Intent: ${intent.intent} — ${intent.summary}`);
+          console.log(`[Telegram] Action: ${intent.action || 'chat'} — ${intent.summary || intent.reply?.slice(0, 50)}`);
 
-          if (intent.intent === 'revise_post' && intent.post_id) {
-            // Route to revision flow — simulate pressing the Revise button
+          // Always send the conversational reply
+          if (intent.reply) {
+            await sendNotification(intent.reply);
+            addToHistory('assistant', intent.reply);
+          }
+
+          if (intent.action === 'revise_post' && intent.post_id) {
+            // Route to revision flow
             pendingRevision = { postId: intent.post_id, chatId: msg.chat.id, messageId: msg.message_id };
-            // Re-inject the message as revision feedback by processing it immediately
             const rev = pendingRevision;
             pendingRevision = null;
-
-            await sendNotification(`Revising post — ${intent.summary}`);
             const post = await getPostById(rev.postId);
             if (!post) {
               await sendNotification(`Couldn't find that post. Use the Revise button on a specific post, or try again.`);
@@ -818,28 +928,34 @@ Classify this request. Return JSON:
             await sendPostForReview({ ...post, ...revised });
             console.log(`[Telegram] Smart revision: post ${rev.postId} (${classification.type})`);
 
-          } else if (intent.intent === 'revise_post' && !intent.post_id) {
-            await sendNotification(`I think you want to revise a post but I'm not sure which one. Tap the Revise button on the post you want to change, then send your feedback.`);
+          } else if (intent.action === 'revise_post' && !intent.post_id) {
+            await sendNotification(`Tap the Revise button on the post you want to change, then send your feedback.`);
 
-          } else if (intent.intent === 'question' || intent.intent === 'general_chat') {
-            const reply = intent.reply || `I'm not sure how to help with that. Try /help for available commands.`;
-            await sendNotification(reply);
-
-          } else {
-            // content_brief
-            await saveBrief(text);
-            await sendNotification(`Noted — I'll work this into tomorrow's posts:\n\n<i>"${text}"</i>`);
-            console.log(`[Telegram] Brief saved: ${text.slice(0, 50)}...`);
+          } else if (intent.action === 'save_brief') {
+            // Start conversational brief — ask a follow-up before saving
+            pendingBrief = { messages: [text], startedAt: Date.now() };
+            try {
+              const followUpResponse = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 150,
+                messages: [{ role: 'user', content: `You are ContentBrain. The content owner wants to brief a future social media post.\n\nThey said: "${text}"\n\nAsk ONE short follow-up question to make this brief more actionable. Focus on: what angle or hook? Any specific data points or stories to include? Which brand (AuctionBrain or BridgeMatch)?\n\nKeep it casual, one sentence. British English.` }]
+              });
+              const followUp = followUpResponse.content[0].text.trim();
+              await sendNotification(followUp);
+              addToHistory('assistant', followUp);
+            } catch (err) {
+              // If follow-up fails, just save immediately
+              await saveBrief(text);
+              pendingBrief = null;
+              await sendNotification(`Saved as a brief for tomorrow's posts.`);
+            }
+            console.log(`[Telegram] Brief conversation started: ${text.slice(0, 50)}...`);
           }
+          // No else needed — conversational reply was already sent above
         } catch (err) {
           console.error(`[Telegram] Smart routing error: ${err.message}`);
-          // Fall back to saving as brief
-          try {
-            await saveBrief(text);
-            await sendNotification(`Saved as a brief for tomorrow's posts:\n\n<i>"${text}"</i>`);
-          } catch (briefErr) {
-            console.error(`[Telegram] Brief fallback error: ${briefErr.message}`);
-          }
+          // Fall back to a simple apology
+          await sendNotification(`Sorry, something went wrong processing that. Try /help for commands.`).catch(() => {});
         }
       }
     }
