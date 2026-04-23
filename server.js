@@ -388,7 +388,10 @@ cron.schedule('*/15 * * * *', async () => {
         // Store Facebook post ID for insights tracking
         if (result.postId) {
           const { supabase } = require('./lib/supabase');
-          await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id).catch(() => {});
+          // Supabase query builder isn't a real Promise — .catch() before await throws TypeError
+          try {
+            await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id);
+          } catch (e) { console.warn(`  fb_post_id save failed: ${e.message}`); }
         }
         console.log(`  Published: ${post.id} (${post.brand}/${post.platform}) fb:${result.postId || 'n/a'}`);
       } catch (err) {
@@ -701,7 +704,10 @@ async function pollTelegram() {
 
             // Store feedback for rejection learning (even if post gets revised and approved)
             const { supabase: sb } = require('./lib/supabase');
-            await sb.from('posts').update({ rejection_feedback: text }).eq('id', rev.postId).catch(() => {});
+            // Supabase query builder isn't a real Promise — .catch() before await throws TypeError
+            try {
+              await sb.from('posts').update({ rejection_feedback: text }).eq('id', rev.postId);
+            } catch (e) { console.warn(`  rejection_feedback save failed: ${e.message}`); }
 
             const Anthropic = require('@anthropic-ai/sdk');
             const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
