@@ -89,16 +89,19 @@ app.post('/api/posts/:id/reject', requireAuth, async (req, res) => {
 });
 
 // ── BLOG POST APPROVE / REJECT ──
+// Optional `?brand=bridgematch` (defaults to auctionbrain) selects which
+// Supabase project the update lands in. Matches the Telegram callback behaviour.
 app.post('/api/blog-posts/:id/approve', requireAuth, async (req, res) => {
   try {
-    const post = await updateBlogPostStatus(req.params.id, 'approved');
+    const brand = req.query.brand === 'bridgematch' ? 'bridgematch' : 'auctionbrain';
+    const post = await updateBlogPostStatus(req.params.id, 'approved', {}, brand);
     // Cross-pollinate: create a content seed from the approved blog
     try {
       await saveSeed({
         source: 'blog_approved',
         summary: `New blog: ${post.title}`,
         key_points: post.summary || post.meta_description || '',
-        brand: post.brand || null,
+        brand: post.brand || brand,
         tags: post.tags || []
       });
       console.log(`[Cross-pollinate] Seed created from blog: ${post.title}`);
@@ -113,7 +116,8 @@ app.post('/api/blog-posts/:id/approve', requireAuth, async (req, res) => {
 
 app.post('/api/blog-posts/:id/reject', requireAuth, async (req, res) => {
   try {
-    const post = await updateBlogPostStatus(req.params.id, 'rejected');
+    const brand = req.query.brand === 'bridgematch' ? 'bridgematch' : 'auctionbrain';
+    const post = await updateBlogPostStatus(req.params.id, 'rejected', {}, brand);
     res.json({ ok: true, post });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -457,16 +461,22 @@ async function pollTelegram() {
       if (cb && cb.data) {
         const parts = cb.data.split(':');
 
-        // rv:<type>:<action>:<id> — review hub callbacks (blog/guide from generators)
-        if (parts.length === 4 && parts[0] === 'rv') {
-          const contentType = parts[1]; // blog, guide, social
-          const rvAction = parts[2];    // approve, reject, revise
-          const rvId = parts[3];
+        // rv:<type>:<brandCode>:<action>:<id>  — review hub callbacks with brand routing
+        // rv:<type>:<action>:<id>              — legacy 4-part format (AB only), kept for backward compat
+        if (parts[0] === 'rv' && (parts.length === 4 || parts.length === 5)) {
+          let contentType, brandCode, rvAction, rvId;
+          if (parts.length === 5) {
+            [, contentType, brandCode, rvAction, rvId] = parts;
+          } else {
+            [, contentType, rvAction, rvId] = parts;
+            brandCode = 'ab'; // legacy messages default to AuctionBrain
+          }
+          const brand = brandCode === 'bm' ? 'bridgematch' : 'auctionbrain';
 
           if (rvId && ['approve', 'reject'].includes(rvAction)) {
             try {
               const status = rvAction === 'approve' ? 'approved' : 'rejected';
-              await updateBlogPostStatus(rvId, status);
+              await updateBlogPostStatus(rvId, status, {}, brand);
 
               const emoji = rvAction === 'approve' ? 'APPROVED' : 'REJECTED';
               const originalCaption = cb.message?.caption || cb.message?.text || '';
@@ -476,12 +486,12 @@ async function pollTelegram() {
               // Cross-pollinate: create seed from approved blog/guide
               if (rvAction === 'approve') {
                 try {
-                  const blogPost = await getBlogPostById(rvId);
+                  const blogPost = await getBlogPostById(rvId, brand);
                   await saveSeed({
                     source: 'blog_approved',
                     summary: `New ${contentType}: ${blogPost.title}`,
                     key_points: blogPost.summary || blogPost.meta_description || '',
-                    brand: blogPost.brand || null,
+                    brand: blogPost.brand || brand,
                     tags: blogPost.tags || []
                   });
                   console.log(`[Cross-pollinate] Seed created from ${contentType}: ${blogPost.title}`);
@@ -490,7 +500,7 @@ async function pollTelegram() {
                 }
               }
 
-              console.log(`[Telegram] ${contentType} ${rvId} ${status}`);
+              console.log(`[Telegram] ${brand} ${contentType} ${rvId} ${status}`);
             } catch (err) {
               console.error(`[Telegram] Error handling rv callback: ${err.message}`);
               await answerCallback(cb.id, 'Error — try again');
@@ -498,10 +508,10 @@ async function pollTelegram() {
           }
 
           if (rvId && rvAction === 'revise') {
-            pendingRevision = { postId: rvId, chatId: cb.message.chat.id, messageId: cb.message.message_id, contentType };
+            pendingRevision = { postId: rvId, chatId: cb.message.chat.id, messageId: cb.message.message_id, contentType, brand };
             await answerCallback(cb.id, 'Send your feedback');
             await sendNotification('What would you like changed? Reply with your feedback.');
-            console.log(`[Telegram] Revision requested for ${contentType} ${rvId}`);
+            console.log(`[Telegram] Revision requested for ${brand} ${contentType} ${rvId}`);
           }
 
           continue;
