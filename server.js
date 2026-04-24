@@ -896,15 +896,18 @@ or
                 allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt', 'title'] }
               });
 
-              const client = getBlogClient(brand);
-              const { error: updateErr } = await client.from('blog_posts').update({
+              // Build the update object with only columns that definitely exist
+              // across both Supabase projects. updated_at lives on AB's table but
+              // not BM's, so omit it — Postgres handles row mtime via xmin if needed.
+              const updateRow = {
                 title: revised.title || post.title,
                 summary: revised.summary || post.summary,
                 content: revised.content || post.content,
                 content_html: newHtml,
-                iteration_count: (post.iteration_count || 1) + 1,
-                updated_at: new Date().toISOString()
-              }).eq('id', rev.postId);
+                iteration_count: (post.iteration_count || 1) + 1
+              };
+              const client = getBlogClient(brand);
+              const { error: updateErr } = await client.from('blog_posts').update(updateRow).eq('id', rev.postId);
               if (updateErr) throw new Error(updateErr.message);
 
               // Mark the original review message as superseded
