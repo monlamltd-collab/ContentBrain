@@ -409,6 +409,45 @@ cron.schedule('*/15 * * * *', async () => {
   }
 });
 
+// Scheduled-publish cron — every 5 minutes, promote any blog/guide whose
+// scheduled_for has arrived to status='published'. Runs against BOTH the
+// primary Supabase project AND the optional bridgematch project so that
+// posts in either project flip on time.
+cron.schedule('*/5 * * * *', async () => {
+  const nowIso = new Date().toISOString();
+  const { supabase, supabaseBridgematch } = require('./lib/supabase');
+  const clients = [
+    { name: 'primary', client: supabase },
+    ...(supabaseBridgematch ? [{ name: 'bridgematch', client: supabaseBridgematch }] : [])
+  ];
+
+  for (const { name, client } of clients) {
+    try {
+      const { data, error } = await client
+        .from('blog_posts')
+        .update({ status: 'published', published_at: nowIso })
+        .eq('status', 'approved')
+        .lte('scheduled_for', nowIso)
+        .select('id, title, brand');
+      if (error) {
+        console.error(`[scheduled-publish:${name}] update error: ${error.message}`);
+        continue;
+      }
+      if (data?.length) {
+        console.log(`[scheduled-publish:${name}] published ${data.length} blog/guide post(s):`);
+        for (const p of data) {
+          console.log(`  - ${p.brand || '?'}: ${p.title}`);
+          try {
+            await sendNotification(`<b>Published</b> (${p.brand || 'unknown'}): ${p.title}`);
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.error(`[scheduled-publish:${name}] cron error: ${err.message}`);
+    }
+  }
+});
+
 // Collect Facebook insights daily at 8pm (gives posts time to accumulate engagement)
 cron.schedule('0 20 * * *', async () => {
   try {
@@ -426,7 +465,8 @@ cron.schedule('0 20 * * *', async () => {
 // Listen for approve/reject button presses
 
 let telegramOffset = 0;
-let pendingRevision = null; // { postId, messageId, chatId }
+let pendingRevision = null; // { postId, messageId, chatId, contentType?, brand? }
+let pendingSchedule = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption? }
 let pendingBrief = null; // { messages: [], startedAt: number }
 
 // ── CHAT MEMORY ──
@@ -514,6 +554,20 @@ async function pollTelegram() {
             console.log(`[Telegram] Revision requested for ${brand} ${contentType} ${rvId}`);
           }
 
+          if (rvId && rvAction === 'schedule') {
+            pendingSchedule = {
+              type: contentType,
+              postId: rvId,
+              chatId: cb.message.chat.id,
+              messageId: cb.message.message_id,
+              brand,
+              originalCaption: cb.message?.caption || cb.message?.text || ''
+            };
+            await answerCallback(cb.id, 'When?');
+            await sendNotification("When should this go live?\n\nExamples: <i>'tomorrow 9am'</i>, <i>'next Tuesday at 10:30'</i>, <i>'in 3 hours'</i>, <i>'2026-05-12 14:00'</i>");
+            console.log(`[Telegram] Schedule prompt for ${brand} ${contentType} ${rvId}`);
+          }
+
           continue;
         }
 
@@ -549,6 +603,19 @@ async function pollTelegram() {
           await answerCallback(cb.id, 'Send your feedback');
           await sendNotification('What would you like changed? Reply with your feedback.');
           console.log(`[Telegram] Revision requested for ${postId}`);
+        }
+
+        if (postId && action === 'schedule') {
+          pendingSchedule = {
+            type: 'social',
+            postId,
+            chatId: cb.message.chat.id,
+            messageId: cb.message.message_id,
+            originalCaption: cb.message?.caption || cb.message?.text || ''
+          };
+          await answerCallback(cb.id, 'When?');
+          await sendNotification("When should this go live?\n\nExamples: <i>'tomorrow 9am'</i>, <i>'next Tuesday at 10:30'</i>, <i>'in 3 hours'</i>, <i>'2026-05-12 14:00'</i>");
+          console.log(`[Telegram] Schedule prompt for social ${postId}`);
         }
 
         continue;
@@ -704,10 +771,169 @@ async function pollTelegram() {
       if (msg && msg.text && String(msg.chat.id) === String(CHAT_ID)) {
         const text = msg.text.trim();
 
+        // Handle pending schedule input — user clicked Schedule and is now telling us when
+        if (pendingSchedule && !text.startsWith('/')) {
+          const sch = pendingSchedule;
+          pendingSchedule = null;
+          try {
+            const Anthropic = require('@anthropic-ai/sdk');
+            const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+            const nowIso = new Date().toISOString();
+            const dayName = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+            const parseResp = await anthropic.messages.create({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 200,
+              messages: [{ role: 'user', content: `Parse this scheduling request into an ISO 8601 timestamp.
+
+Current time: ${nowIso} (${dayName}, UK time).
+User wants to schedule a post for: "${text}"
+
+Rules:
+- Output a single ISO 8601 string in UTC (e.g. 2026-05-12T14:00:00Z)
+- If the user says a time without specifying AM/PM and it's ambiguous, prefer 9am-6pm
+- If only a date is given without a time, use 09:00 UTC
+- "tomorrow" = next day, "next Tuesday" = upcoming Tuesday
+- Refuse if the request is in the past or unparseable
+
+Return JSON only:
+{ "iso": "2026-05-12T14:00:00Z", "human": "Tuesday 12 May at 14:00 UK", "ok": true }
+or
+{ "ok": false, "error": "short reason" }` }]
+            });
+            const parseText = parseResp.content[0].text;
+            const m = parseText.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('Could not interpret your time');
+            const parsed = JSON.parse(m[0]);
+            if (!parsed.ok) {
+              await sendNotification(`I couldn't schedule that: ${parsed.error || 'try a different format'}.`);
+              return;
+            }
+            const scheduledIso = parsed.iso;
+            if (new Date(scheduledIso).getTime() < Date.now() - 60000) {
+              await sendNotification("That time is in the past. Try again.");
+              return;
+            }
+
+            // Update DB — social posts use the primary client; blog/guide route by brand
+            const { supabase, getBlogClient } = require('./lib/supabase');
+            if (sch.type === 'social') {
+              const { error } = await supabase.from('posts').update({
+                status: 'approved',
+                scheduled_for: scheduledIso,
+                approved_at: new Date().toISOString()
+              }).eq('id', sch.postId);
+              if (error) throw new Error(error.message);
+            } else {
+              const client = getBlogClient(sch.brand || 'auctionbrain');
+              const { error } = await client.from('blog_posts').update({
+                status: 'approved',
+                scheduled_for: scheduledIso,
+                approved_at: new Date().toISOString()
+              }).eq('id', sch.postId);
+              if (error) throw new Error(error.message);
+            }
+
+            // Mark the original review message as scheduled
+            try {
+              await removeButtons(sch.chatId, sch.messageId, `${sch.originalCaption}\n\nSCHEDULED · ${parsed.human}`);
+            } catch {}
+            await sendNotification(`Scheduled for ${parsed.human}. It will publish automatically.`);
+            console.log(`[Telegram] Scheduled ${sch.type} ${sch.postId} for ${scheduledIso}`);
+          } catch (err) {
+            console.error(`[Telegram] Schedule error: ${err.message}`);
+            await sendNotification(`Couldn't schedule: ${err.message}. Try again — type a time or click another button.`);
+          }
+          return;
+        }
+
         // Handle pending revision feedback
         if (pendingRevision && !text.startsWith('/')) {
           const rev = pendingRevision;
           pendingRevision = null;
+
+          // ── Blog / guide revision branch ──
+          // Long-form content: send the full post + the user's editing instructions
+          // to Claude Sonnet, save the revised version back to the right Supabase
+          // project, and re-post a fresh review message.
+          if (rev.contentType === 'blog' || rev.contentType === 'guide') {
+            try {
+              await sendNotification('Reading the draft and your feedback...');
+              const { getBlogClient, getBlogPostById } = require('./lib/supabase');
+              const brand = rev.brand || 'auctionbrain';
+              const post = await getBlogPostById(rev.postId, brand);
+
+              // Persist the editor feedback for traceability
+              try {
+                const client = getBlogClient(brand);
+                await client.from('blog_posts').update({ revision_feedback: text }).eq('id', rev.postId);
+              } catch (e) { console.warn(`  revision_feedback save failed: ${e.message}`); }
+
+              const Anthropic = require('@anthropic-ai/sdk');
+              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+              const brandLabel = brand === 'bridgematch' ? 'BridgeMatch (bridging finance broker voice)' : 'AuctionBrain (auction property investor voice)';
+
+              const sysPrompt = `You are a senior editor revising a ${rev.contentType} for ${brandLabel}. Apply the editor's instruction faithfully without changing the underlying facts. Keep British English, no Americanisms, no fabrication. Return the full revised post — do not truncate.`;
+
+              const userPrompt = `Current draft:\n\nTITLE: ${post.title}\n\nSUMMARY: ${post.summary || ''}\n\nMARKDOWN BODY:\n${post.content || ''}\n\n---\n\nEDITOR INSTRUCTION: ${text}\n\n---\n\nReturn ONLY this JSON (no commentary):\n{\n  "title": "Updated title (or unchanged)",\n  "summary": "Updated 1-2 sentence summary",\n  "content": "Full revised markdown body — keep all H2/H3 headings, bullets, internal links",\n  "change_note": "One sentence describing what you changed"\n}`;
+
+              const resp = await anthropic.messages.create({
+                model: 'claude-sonnet-4-5-20250929',
+                max_tokens: 8000,
+                system: sysPrompt,
+                messages: [{ role: 'user', content: userPrompt }]
+              });
+              const txt = resp.content[0].text;
+              const m = txt.match(/\{[\s\S]*\}/);
+              if (!m) throw new Error('Claude did not return JSON');
+              const revised = JSON.parse(m[0]);
+
+              // Re-render markdown to HTML for the live blog page
+              const { marked } = require('marked');
+              const sanitizeHtml = require('sanitize-html');
+              const newHtml = sanitizeHtml(await marked.parse(revised.content || post.content), {
+                allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1', 'h2', 'h3', 'h4', 'img']),
+                allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt', 'title'] }
+              });
+
+              const client = getBlogClient(brand);
+              const { error: updateErr } = await client.from('blog_posts').update({
+                title: revised.title || post.title,
+                summary: revised.summary || post.summary,
+                content: revised.content || post.content,
+                content_html: newHtml,
+                iteration_count: (post.iteration_count || 1) + 1,
+                updated_at: new Date().toISOString()
+              }).eq('id', rev.postId);
+              if (updateErr) throw new Error(updateErr.message);
+
+              // Mark the original review message as superseded
+              try {
+                await removeButtons(rev.chatId, rev.messageId, `${(rev.originalCaption || post.title)}\n\nREVISED · ${revised.change_note || 'edits applied'}`);
+              } catch {}
+
+              // Re-send a fresh review message with the new title/summary
+              const { sendBlogForReview } = require('./lib/telegram');
+              const wordCount = (revised.content || '').split(/\s+/).filter(Boolean).length;
+              await sendBlogForReview({
+                content_type: rev.contentType,
+                brand,
+                source: 'revision',
+                post_id: rev.postId,
+                title: revised.title || post.title,
+                summary: revised.summary || post.summary,
+                score: post.evaluation_score,
+                word_count: wordCount
+              });
+              console.log(`[Telegram] Revised ${rev.contentType} ${rev.postId}: ${revised.change_note || 'edits applied'}`);
+            } catch (err) {
+              console.error(`[Telegram] Blog revision error: ${err.message}`);
+              await sendNotification(`Couldn't revise: ${err.message}. The draft is unchanged — try Revise again with different wording.`);
+            }
+            return;
+          }
+
+          // ── Social post revision branch (existing flow) ──
           try {
             await sendNotification('Interpreting your feedback...');
             const post = await getPostById(rev.postId);
