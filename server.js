@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
+const { timingSafeEqual } = require('crypto');
 const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
@@ -10,6 +11,16 @@ const reviewRouter = require('./lib/review-api');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PASSWORD = process.env.REVIEW_UI_PASSWORD;
+
+// Constant-time string compare for session/password checks. Length mismatch
+// returns false without comparing bytes (length itself isn't a secret).
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
+}
 
 app.use(express.json());
 app.use('/output', express.static(path.join(__dirname, 'output')));
@@ -37,9 +48,9 @@ app.use('/api', reviewRouter);
 
 // ── AUTH MIDDLEWARE ──
 function requireAuth(req, res, next) {
-  // Check session cookie or query param
+  // Check session cookie or query param — constant-time compare against PASSWORD
   const token = req.cookies?.auth || req.query.token || req.headers['x-auth-token'];
-  if (token === PASSWORD) return next();
+  if (PASSWORD && safeEqual(token, PASSWORD)) return next();
 
   // Show login form
   if (req.method === 'GET' && req.path === '/') {
@@ -50,7 +61,7 @@ function requireAuth(req, res, next) {
 
 // ── LOGIN ──
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
-  if (req.body.password === PASSWORD) {
+  if (PASSWORD && safeEqual(req.body.password, PASSWORD)) {
     res.setHeader('Set-Cookie', `auth=${PASSWORD}; HttpOnly; Path=/; Max-Age=86400`);
     return res.redirect('/');
   }
@@ -487,6 +498,178 @@ function getHistoryContext() {
   ).join('\n') + '\n\n';
 }
 
+/**
+ * Locate a post by ID, searching social posts then blog posts in both projects.
+ * Returns { kind: 'social' | 'blog', brand, post } or null. Used by smart-intent
+ * routing so a chat-typed "revise post X" command can dispatch to the correct
+ * table/project even when the user doesn't specify which.
+ */
+async function findPostAnywhere(postId) {
+  if (!postId) return null;
+  // Try social first (primary project)
+  try {
+    const social = await getPostById(postId);
+    if (social) return { kind: 'social', brand: social.brand || 'auctionbrain', post: social };
+  } catch {}
+  // Try blog in both projects
+  for (const brand of ['auctionbrain', 'bridgematch']) {
+    try {
+      const { getBlogPostById } = require('./lib/supabase');
+      const blog = await getBlogPostById(postId, brand);
+      if (blog) return { kind: 'blog', brand: blog.brand || brand, post: blog };
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Apply an editor instruction to a blog/guide post using the same writer
+ * context (voice rules, source articles, existing posts) the original
+ * generator had. Updates the blog_posts row, optionally clears the original
+ * Telegram review buttons, and sends a fresh review card with the new title.
+ *
+ * Used from both the Revise button callback and the natural-language
+ * smart-intent revise path. originalCaption / messageId are optional —
+ * when absent (smart-intent), we skip the "stamp REVISED" step.
+ */
+async function reviseBlogPost(opts) {
+  const { postId, brand, contentType, editorText, chatId, messageId, originalCaption } = opts;
+  const {
+    getBlogClient,
+    getBlogPostById,
+    getSourceArticlesForPost,
+    getPublishedPostsForBrand
+  } = require('./lib/supabase');
+  const { getVoiceForBrand } = require('./lib/voice');
+
+  await sendNotification('Reading the draft, your feedback, and the source articles...');
+
+  // Fetch the post + source articles + existing posts in parallel
+  const [post, sourceArticles, existingPosts] = await Promise.all([
+    getBlogPostById(postId, brand),
+    getSourceArticlesForPost(postId, brand),
+    getPublishedPostsForBrand(brand, 30)
+  ]);
+
+  // Persist the editor feedback for traceability (best-effort)
+  try {
+    const client = getBlogClient(brand);
+    await client.from('blog_posts').update({ revision_feedback: editorText }).eq('id', postId);
+  } catch (e) { console.warn(`  revision_feedback save failed: ${e.message}`); }
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+  const sysPrompt = getVoiceForBrand(brand);
+  const baseDomain = brand === 'bridgematch' ? 'bridgematch.co.uk' : 'auctionbrain.co.uk';
+
+  const sourceMaterialBlock = sourceArticles.length === 0
+    ? '(Source material no longer linked to this post — work from the draft and editor instruction. Do not invent facts.)'
+    : sourceArticles
+        .map(a => `### ${a.title || 'Untitled'}${a.url ? ` (${a.url})` : ''}\n${(a.content || '').slice(0, 1500)}`)
+        .join('\n\n---\n\n');
+
+  const existingPostsBlock = existingPosts.length === 0
+    ? '(No published posts available for internal linking yet.)'
+    : existingPosts
+        .map(p => `- "${p.title}" — ${p.summary || 'No summary'} [/blog/${p.slug}]${p.cluster ? ` [cluster: ${p.cluster}]` : ''}`)
+        .join('\n');
+
+  const userPrompt = `You wrote the draft below. The editor wants changes. Apply faithfully — and feel free to pull deeper from the source articles or add internal links where genuinely useful.
+
+ORIGINAL DRAFT
+TITLE: ${post.title}
+SUMMARY: ${post.summary || ''}
+CLUSTER: ${post.cluster || '(untagged)'}
+
+MARKDOWN BODY:
+${post.content || ''}
+
+---
+
+SOURCE MATERIAL (the same articles you originally drew from)
+
+${sourceMaterialBlock}
+
+---
+
+EXISTING PUBLISHED POSTS (candidates for internal linking — anchor text must be descriptive, only link if genuinely relevant; full URL is https://${baseDomain}/blog/<slug>)
+
+${existingPostsBlock}
+
+---
+
+EDITOR INSTRUCTION:
+"${editorText}"
+
+---
+
+Apply the editor's instruction. Keep the voice rules. Use the source material for any fresh facts/quotes — do not fabricate. Return the FULL revised post — do not truncate.
+
+Return ONLY this JSON (no commentary, no markdown fences):
+{
+  "title": "Updated title (or unchanged)",
+  "summary": "Updated 1-2 sentence summary",
+  "content": "Full revised markdown body — keep H1/H2/H3 hierarchy, end with the --- divider + author byline",
+  "change_note": "One sentence describing what you changed and why"
+}`;
+
+  const resp = await anthropic.messages.create({
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: 8000,
+    system: sysPrompt,
+    messages: [{ role: 'user', content: userPrompt }]
+  });
+  const txt = resp.content[0].text;
+  const m = txt.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('Claude did not return JSON');
+  const revised = JSON.parse(m[0]);
+
+  // Re-render markdown to HTML for the live blog page
+  const { marked } = require('marked');
+  const sanitizeHtml = require('sanitize-html');
+  const newHtml = sanitizeHtml(await marked.parse(revised.content || post.content), {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1', 'h2', 'h3', 'h4', 'img']),
+    allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt', 'title'] }
+  });
+
+  // Build the update object with only columns that definitely exist
+  // across both Supabase projects. updated_at lives on AB's table but
+  // not BM's, so omit it.
+  const updateRow = {
+    title: revised.title || post.title,
+    summary: revised.summary || post.summary,
+    content: revised.content || post.content,
+    content_html: newHtml,
+    iteration_count: (post.iteration_count || 1) + 1
+  };
+  const client = getBlogClient(brand);
+  const { error: updateErr } = await client.from('blog_posts').update(updateRow).eq('id', postId);
+  if (updateErr) throw new Error(updateErr.message);
+
+  // Mark the original review message as superseded (only if we have it)
+  if (chatId && messageId) {
+    try {
+      await removeButtons(chatId, messageId, `${(originalCaption || post.title)}\n\nREVISED · ${revised.change_note || 'edits applied'}`);
+    } catch {}
+  }
+
+  // Re-send a fresh review message with the new title/summary
+  const { sendBlogForReview } = require('./lib/telegram');
+  const wordCount = (revised.content || '').split(/\s+/).filter(Boolean).length;
+  await sendBlogForReview({
+    content_type: contentType,
+    brand,
+    source: 'revision',
+    post_id: postId,
+    title: revised.title || post.title,
+    summary: revised.summary || post.summary,
+    score: post.evaluation_score,
+    word_count: wordCount
+  });
+  console.log(`[Telegram] Revised ${contentType} ${postId}: ${revised.change_note || 'edits applied'}`);
+}
+
 async function pollTelegram() {
   if (!BOT_TOKEN) return;
 
@@ -855,149 +1038,19 @@ or
           pendingRevision = null;
 
           // ── Blog / guide revision branch ──
-          // Long-form content: send the full post + the user's editing instructions
-          // to Claude Sonnet, save the revised version back to the right Supabase
-          // project, and re-post a fresh review message.
+          // Delegates to reviseBlogPost() so both the button-press path here
+          // and the smart-intent natural-language path can share one implementation.
           if (rev.contentType === 'blog' || rev.contentType === 'guide') {
             try {
-              await sendNotification('Reading the draft, your feedback, and the source articles...');
-              const {
-                getBlogClient,
-                getBlogPostById,
-                getSourceArticlesForPost,
-                getPublishedPostsForBrand
-              } = require('./lib/supabase');
-              const { getVoiceForBrand } = require('./lib/voice');
-              const brand = rev.brand || 'auctionbrain';
-
-              // Fetch the post + source articles + existing posts in parallel
-              const [post, sourceArticles, existingPosts] = await Promise.all([
-                getBlogPostById(rev.postId, brand),
-                getSourceArticlesForPost(rev.postId, brand),
-                getPublishedPostsForBrand(brand, 30)
-              ]);
-
-              // Persist the editor feedback for traceability
-              try {
-                const client = getBlogClient(brand);
-                await client.from('blog_posts').update({ revision_feedback: text }).eq('id', rev.postId);
-              } catch (e) { console.warn(`  revision_feedback save failed: ${e.message}`); }
-
-              const Anthropic = require('@anthropic-ai/sdk');
-              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-
-              // System prompt = the original writer's brief (per brand)
-              const sysPrompt = getVoiceForBrand(brand);
-
-              // Build the structured user prompt — same shape as original generation
-              const baseDomain = brand === 'bridgematch' ? 'bridgematch.co.uk' : 'auctionbrain.co.uk';
-
-              let sourceMaterialBlock;
-              if (sourceArticles.length === 0) {
-                sourceMaterialBlock = '(Source material no longer linked to this post — work from the draft and editor instruction. Do not invent facts.)';
-              } else {
-                sourceMaterialBlock = sourceArticles
-                  .map(a => `### ${a.title || 'Untitled'}${a.url ? ` (${a.url})` : ''}\n${(a.content || '').slice(0, 1500)}`)
-                  .join('\n\n---\n\n');
-              }
-
-              const existingPostsBlock = existingPosts.length === 0
-                ? '(No published posts available for internal linking yet.)'
-                : existingPosts
-                    .map(p => `- "${p.title}" — ${p.summary || 'No summary'} [/blog/${p.slug}]${p.cluster ? ` [cluster: ${p.cluster}]` : ''}`)
-                    .join('\n');
-
-              const userPrompt = `You wrote the draft below. The editor wants changes. Apply faithfully — and feel free to pull deeper from the source articles or add internal links where genuinely useful.
-
-ORIGINAL DRAFT
-TITLE: ${post.title}
-SUMMARY: ${post.summary || ''}
-CLUSTER: ${post.cluster || '(untagged)'}
-
-MARKDOWN BODY:
-${post.content || ''}
-
----
-
-SOURCE MATERIAL (the same articles you originally drew from)
-
-${sourceMaterialBlock}
-
----
-
-EXISTING PUBLISHED POSTS (candidates for internal linking — anchor text must be descriptive, only link if genuinely relevant; full URL is https://${baseDomain}/blog/<slug>)
-
-${existingPostsBlock}
-
----
-
-EDITOR INSTRUCTION:
-"${text}"
-
----
-
-Apply the editor's instruction. Keep the voice rules. Use the source material for any fresh facts/quotes — do not fabricate. Return the FULL revised post — do not truncate.
-
-Return ONLY this JSON (no commentary, no markdown fences):
-{
-  "title": "Updated title (or unchanged)",
-  "summary": "Updated 1-2 sentence summary",
-  "content": "Full revised markdown body — keep H1/H2/H3 hierarchy, end with the --- divider + author byline",
-  "change_note": "One sentence describing what you changed and why"
-}`;
-
-              const resp = await anthropic.messages.create({
-                model: 'claude-sonnet-4-5-20250929',
-                max_tokens: 8000,
-                system: sysPrompt,
-                messages: [{ role: 'user', content: userPrompt }]
+              await reviseBlogPost({
+                postId: rev.postId,
+                brand: rev.brand || 'auctionbrain',
+                contentType: rev.contentType,
+                editorText: text,
+                chatId: rev.chatId,
+                messageId: rev.messageId,
+                originalCaption: rev.originalCaption
               });
-              const txt = resp.content[0].text;
-              const m = txt.match(/\{[\s\S]*\}/);
-              if (!m) throw new Error('Claude did not return JSON');
-              const revised = JSON.parse(m[0]);
-
-              // Re-render markdown to HTML for the live blog page
-              const { marked } = require('marked');
-              const sanitizeHtml = require('sanitize-html');
-              const newHtml = sanitizeHtml(await marked.parse(revised.content || post.content), {
-                allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1', 'h2', 'h3', 'h4', 'img']),
-                allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt', 'title'] }
-              });
-
-              // Build the update object with only columns that definitely exist
-              // across both Supabase projects. updated_at lives on AB's table but
-              // not BM's, so omit it — Postgres handles row mtime via xmin if needed.
-              const updateRow = {
-                title: revised.title || post.title,
-                summary: revised.summary || post.summary,
-                content: revised.content || post.content,
-                content_html: newHtml,
-                iteration_count: (post.iteration_count || 1) + 1
-              };
-              const client = getBlogClient(brand);
-              const { error: updateErr } = await client.from('blog_posts').update(updateRow).eq('id', rev.postId);
-              if (updateErr) throw new Error(updateErr.message);
-
-              // Mark the original review message as superseded
-              try {
-                await removeButtons(rev.chatId, rev.messageId, `${(rev.originalCaption || post.title)}\n\nREVISED · ${revised.change_note || 'edits applied'}`);
-              } catch {}
-
-              // Re-send a fresh review message with the new title/summary
-              const { sendBlogForReview } = require('./lib/telegram');
-              const wordCount = (revised.content || '').split(/\s+/).filter(Boolean).length;
-              await sendBlogForReview({
-                content_type: rev.contentType,
-                brand,
-                source: 'revision',
-                post_id: rev.postId,
-                title: revised.title || post.title,
-                summary: revised.summary || post.summary,
-                score: post.evaluation_score,
-                word_count: wordCount
-              });
-              console.log(`[Telegram] Revised ${rev.contentType} ${rev.postId}: ${revised.change_note || 'edits applied'}`);
             } catch (err) {
               console.error(`[Telegram] Blog revision error: ${err.message}`);
               await sendNotification(`Couldn't revise: ${err.message}. The draft is unchanged — try Revise again with different wording.`);
@@ -1371,15 +1424,37 @@ Guidelines:
           }
 
           if (intent.action === 'revise_post' && intent.post_id) {
-            // Route to revision flow
-            pendingRevision = { postId: intent.post_id, chatId: msg.chat.id, messageId: msg.message_id };
-            const rev = pendingRevision;
-            pendingRevision = null;
-            const post = await getPostById(rev.postId);
-            if (!post) {
+            // Look up the post in social posts OR blog posts (both projects)
+            // so a chat-typed revision routes to the correct table/brand.
+            const found = await findPostAnywhere(intent.post_id);
+            if (!found) {
               await sendNotification(`Couldn't find that post. Use the Revise button on a specific post, or try again.`);
               continue;
             }
+
+            // Blog/guide posts get the full writer-context revision flow.
+            if (found.kind === 'blog') {
+              try {
+                const contentType = found.post.post_type === 'guide' ? 'guide' : 'blog';
+                await reviseBlogPost({
+                  postId: intent.post_id,
+                  brand: found.brand,
+                  contentType,
+                  editorText: text,
+                  chatId: null,        // no original review card to update — send fresh card only
+                  messageId: null,
+                  originalCaption: null
+                });
+              } catch (err) {
+                console.error(`[Telegram] Blog revision (intent) error: ${err.message}`);
+                await sendNotification(`Couldn't revise: ${err.message}.`);
+              }
+              continue;
+            }
+
+            // Social post — fall through to existing classify-then-rewrite flow.
+            const rev = { postId: intent.post_id, chatId: msg.chat.id, messageId: msg.message_id };
+            const post = found.post;
 
             const { brands } = require('./lib/config');
             const b = brands[post.brand] || brands.auctionbrain;
@@ -1519,7 +1594,7 @@ Classify this request. Return JSON:
             try {
               const urlToScrape = intent.url;
 
-              // Validate URL — only allow http/https to prevent SSRF
+              // Validate URL — scheme + DNS-resolved IP range to prevent SSRF
               let parsedUrl;
               try {
                 parsedUrl = new URL(urlToScrape);
@@ -1532,13 +1607,58 @@ Classify this request. Return JSON:
                 continue;
               }
 
+              // Resolve the host and reject loopback / private / link-local
+              // ranges before fetching. Blocks AWS metadata (169.254.169.254),
+              // intra-VPC services, and the local network. (Best-effort: there
+              // is a TOCTOU window between resolution and connect, but the
+              // endpoint is owner-authenticated so the residual risk is low.)
+              try {
+                const dns = require('dns').promises;
+                const addrs = await dns.lookup(parsedUrl.hostname, { all: true });
+                const isBlocked = (ip, family) => {
+                  if (family === 4) {
+                    const [a, b] = ip.split('.').map(Number);
+                    if (a === 0 || a === 10 || a === 127) return true;
+                    if (a === 169 && b === 254) return true;
+                    if (a === 172 && b >= 16 && b <= 31) return true;
+                    if (a === 192 && b === 168) return true;
+                    return false;
+                  }
+                  if (family === 6) {
+                    const lower = ip.toLowerCase();
+                    if (lower === '::1' || lower === '::') return true;
+                    if (lower.startsWith('fe80:') || lower.startsWith('fec0:')) return true;
+                    if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
+                    if (lower.startsWith('::ffff:')) {
+                      // IPv4-mapped — recurse on the v4 part
+                      const v4 = lower.slice(7);
+                      return isBlocked(v4, 4);
+                    }
+                  }
+                  return false;
+                };
+                if (addrs.some(a => isBlocked(a.address, a.family))) {
+                  await sendNotification(`That URL resolves to a private/internal address — blocked for safety.`);
+                  continue;
+                }
+              } catch (e) {
+                await sendNotification(`Couldn't resolve that hostname.`);
+                continue;
+              }
+
               let pageContent = '';
 
               // Fetch the page content
               const pageRes = await fetch(parsedUrl.href, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ContentBrain/1.0)' },
-                signal: AbortSignal.timeout(15000)
+                signal: AbortSignal.timeout(15000),
+                redirect: 'manual' // don't auto-follow; a redirect to 169.254.x.x would bypass the check
               });
+              // If the server redirected, follow ONCE after re-checking the new URL
+              if (pageRes.status >= 300 && pageRes.status < 400) {
+                await sendNotification(`That URL redirected — refusing to follow automatically. Send the final URL directly.`);
+                continue;
+              }
               if (pageRes.ok) {
                 const html = await pageRes.text();
                 // Strip HTML tags for a rough text extraction
