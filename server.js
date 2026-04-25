@@ -858,10 +858,22 @@ or
           // project, and re-post a fresh review message.
           if (rev.contentType === 'blog' || rev.contentType === 'guide') {
             try {
-              await sendNotification('Reading the draft and your feedback...');
-              const { getBlogClient, getBlogPostById } = require('./lib/supabase');
+              await sendNotification('Reading the draft, your feedback, and the source articles...');
+              const {
+                getBlogClient,
+                getBlogPostById,
+                getSourceArticlesForPost,
+                getPublishedPostsForBrand
+              } = require('./lib/supabase');
+              const { getVoiceForBrand } = require('./lib/voice');
               const brand = rev.brand || 'auctionbrain';
-              const post = await getBlogPostById(rev.postId, brand);
+
+              // Fetch the post + source articles + existing posts in parallel
+              const [post, sourceArticles, existingPosts] = await Promise.all([
+                getBlogPostById(rev.postId, brand),
+                getSourceArticlesForPost(rev.postId, brand),
+                getPublishedPostsForBrand(brand, 30)
+              ]);
 
               // Persist the editor feedback for traceability
               try {
@@ -871,11 +883,66 @@ or
 
               const Anthropic = require('@anthropic-ai/sdk');
               const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-              const brandLabel = brand === 'bridgematch' ? 'BridgeMatch (bridging finance broker voice)' : 'AuctionBrain (auction property investor voice)';
 
-              const sysPrompt = `You are a senior editor revising a ${rev.contentType} for ${brandLabel}. Apply the editor's instruction faithfully without changing the underlying facts. Keep British English, no Americanisms, no fabrication. Return the full revised post — do not truncate.`;
+              // System prompt = the original writer's brief (per brand)
+              const sysPrompt = getVoiceForBrand(brand);
 
-              const userPrompt = `Current draft:\n\nTITLE: ${post.title}\n\nSUMMARY: ${post.summary || ''}\n\nMARKDOWN BODY:\n${post.content || ''}\n\n---\n\nEDITOR INSTRUCTION: ${text}\n\n---\n\nReturn ONLY this JSON (no commentary):\n{\n  "title": "Updated title (or unchanged)",\n  "summary": "Updated 1-2 sentence summary",\n  "content": "Full revised markdown body — keep all H2/H3 headings, bullets, internal links",\n  "change_note": "One sentence describing what you changed"\n}`;
+              // Build the structured user prompt — same shape as original generation
+              const baseDomain = brand === 'bridgematch' ? 'bridgematch.co.uk' : 'auctionbrain.co.uk';
+
+              let sourceMaterialBlock;
+              if (sourceArticles.length === 0) {
+                sourceMaterialBlock = '(Source material no longer linked to this post — work from the draft and editor instruction. Do not invent facts.)';
+              } else {
+                sourceMaterialBlock = sourceArticles
+                  .map(a => `### ${a.title || 'Untitled'}${a.url ? ` (${a.url})` : ''}\n${(a.content || '').slice(0, 1500)}`)
+                  .join('\n\n---\n\n');
+              }
+
+              const existingPostsBlock = existingPosts.length === 0
+                ? '(No published posts available for internal linking yet.)'
+                : existingPosts
+                    .map(p => `- "${p.title}" — ${p.summary || 'No summary'} [/blog/${p.slug}]${p.cluster ? ` [cluster: ${p.cluster}]` : ''}`)
+                    .join('\n');
+
+              const userPrompt = `You wrote the draft below. The editor wants changes. Apply faithfully — and feel free to pull deeper from the source articles or add internal links where genuinely useful.
+
+ORIGINAL DRAFT
+TITLE: ${post.title}
+SUMMARY: ${post.summary || ''}
+CLUSTER: ${post.cluster || '(untagged)'}
+
+MARKDOWN BODY:
+${post.content || ''}
+
+---
+
+SOURCE MATERIAL (the same articles you originally drew from)
+
+${sourceMaterialBlock}
+
+---
+
+EXISTING PUBLISHED POSTS (candidates for internal linking — anchor text must be descriptive, only link if genuinely relevant; full URL is https://${baseDomain}/blog/<slug>)
+
+${existingPostsBlock}
+
+---
+
+EDITOR INSTRUCTION:
+"${text}"
+
+---
+
+Apply the editor's instruction. Keep the voice rules. Use the source material for any fresh facts/quotes — do not fabricate. Return the FULL revised post — do not truncate.
+
+Return ONLY this JSON (no commentary, no markdown fences):
+{
+  "title": "Updated title (or unchanged)",
+  "summary": "Updated 1-2 sentence summary",
+  "content": "Full revised markdown body — keep H1/H2/H3 hierarchy, end with the --- divider + author byline",
+  "change_note": "One sentence describing what you changed and why"
+}`;
 
               const resp = await anthropic.messages.create({
                 model: 'claude-sonnet-4-5-20250929',
