@@ -14,6 +14,21 @@ const PASSWORD = process.env.REVIEW_UI_PASSWORD;
 app.use(express.json());
 app.use('/output', express.static(path.join(__dirname, 'output')));
 
+// Cookie parser — MUST run before any route or middleware that reads req.cookies
+// (e.g. requireAuth). Express runs middleware in registration order, so this
+// has to come before app.use('/api', ...) and before route handlers below.
+app.use((req, res, next) => {
+  req.cookies = {};
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    cookieHeader.split(';').forEach(c => {
+      const [key, val] = c.trim().split('=');
+      req.cookies[key] = val;
+    });
+  }
+  next();
+});
+
 // Health check (no auth — used by Railway)
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -32,19 +47,6 @@ function requireAuth(req, res, next) {
   }
   return res.status(401).json({ error: 'Unauthorized' });
 }
-
-// Simple cookie parser
-app.use((req, res, next) => {
-  req.cookies = {};
-  const cookieHeader = req.headers.cookie;
-  if (cookieHeader) {
-    cookieHeader.split(';').forEach(c => {
-      const [key, val] = c.trim().split('=');
-      req.cookies[key] = val;
-    });
-  }
-  next();
-});
 
 // ── LOGIN ──
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
@@ -807,12 +809,12 @@ or
             const parsed = JSON.parse(m[0]);
             if (!parsed.ok) {
               await sendNotification(`I couldn't schedule that: ${parsed.error || 'try a different format'}.`);
-              return;
+              continue;
             }
             const scheduledIso = parsed.iso;
             if (new Date(scheduledIso).getTime() < Date.now() - 60000) {
               await sendNotification("That time is in the past. Try again.");
-              return;
+              continue;
             }
 
             // Update DB — social posts use the primary client; blog/guide route by brand
@@ -844,7 +846,7 @@ or
             console.error(`[Telegram] Schedule error: ${err.message}`);
             await sendNotification(`Couldn't schedule: ${err.message}. Try again — type a time or click another button.`);
           }
-          return;
+          continue;
         }
 
         // Handle pending revision feedback
@@ -1000,7 +1002,7 @@ Return ONLY this JSON (no commentary, no markdown fences):
               console.error(`[Telegram] Blog revision error: ${err.message}`);
               await sendNotification(`Couldn't revise: ${err.message}. The draft is unchanged — try Revise again with different wording.`);
             }
-            return;
+            continue;
           }
 
           // ── Social post revision branch (existing flow) ──
@@ -1079,11 +1081,12 @@ Classify this request. Return JSON:
 
             // Apply copy changes
             const { supabase } = require('./lib/supabase');
-            await supabase.from('posts').update({
+            const { error: copyErr } = await supabase.from('posts').update({
               copy_headline: revised.copy_headline,
               copy_body: revised.copy_body || '',
               copy_cta: revised.copy_cta || ''
             }).eq('id', rev.postId);
+            if (copyErr) throw new Error(`Copy update failed: ${copyErr.message}`);
 
             // Re-render video if needed
             if (needsVideoRerender && post.video_url) {
@@ -1434,11 +1437,12 @@ Classify this request. Return JSON:
             }
 
             const { supabase } = require('./lib/supabase');
-            await supabase.from('posts').update({
+            const { error: copyErr } = await supabase.from('posts').update({
               copy_headline: revised.copy_headline,
               copy_body: revised.copy_body || '',
               copy_cta: revised.copy_cta || ''
             }).eq('id', rev.postId);
+            if (copyErr) throw new Error(`Copy update failed: ${copyErr.message}`);
 
             if (needsVideoRerender && post.video_url) {
               try {
