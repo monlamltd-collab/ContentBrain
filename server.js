@@ -352,6 +352,13 @@ async function runGenerate() {
         scheduledFor.setDate(scheduledFor.getDate() + daysAhead + 1);
         scheduledFor.setHours(hour, 0, 0, 0);
 
+        // meta carries generation-time fields (hook_pattern, cta_pattern) so
+        // future generations can rotate properly and the admin can chart
+        // pattern-level performance once Facebook insights have caught up.
+        const meta = {};
+        if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
+        if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
+
         const saved = await insertPost({
           brand: post.brand,
           platform: post.platform,
@@ -362,7 +369,8 @@ async function runGenerate() {
           image_url: filename,
           video_url: videoFilename,
           status: 'draft',
-          scheduled_for: scheduledFor.toISOString()
+          scheduled_for: scheduledFor.toISOString(),
+          meta
         });
 
         savedPosts.push(saved);
