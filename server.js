@@ -1000,8 +1000,10 @@ or
               continue;
             }
 
-            // Update DB — social posts use the primary client; blog/guide route by brand
-            const { supabase, getBlogClient } = require('./lib/supabase');
+            // Update DB — social posts use the primary client directly; blog/guide
+            // route through updateBlogPostStatus so the column-drop retry handles
+            // BM's missing approved_at/published_at columns gracefully.
+            const { supabase, updateBlogPostStatus } = require('./lib/supabase');
             if (sch.type === 'social') {
               const { error } = await supabase.from('posts').update({
                 status: 'approved',
@@ -1010,13 +1012,7 @@ or
               }).eq('id', sch.postId);
               if (error) throw new Error(error.message);
             } else {
-              const client = getBlogClient(sch.brand || 'auctionbrain');
-              const { error } = await client.from('blog_posts').update({
-                status: 'approved',
-                scheduled_for: scheduledIso,
-                approved_at: new Date().toISOString()
-              }).eq('id', sch.postId);
-              if (error) throw new Error(error.message);
+              await updateBlogPostStatus(sch.postId, 'approved', { scheduled_for: scheduledIso }, sch.brand || 'auctionbrain');
             }
 
             // Mark the original review message as scheduled
