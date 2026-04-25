@@ -480,6 +480,7 @@ cron.schedule('0 20 * * *', async () => {
 let telegramOffset = 0;
 let pendingRevision = null; // { postId, messageId, chatId, contentType?, brand? }
 let pendingSchedule = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption? }
+let pendingRejection = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption?, contentType? }
 let pendingBrief = null; // { messages: [], startedAt: number }
 
 // ── CHAT MEMORY ──
@@ -698,38 +699,51 @@ async function pollTelegram() {
           }
           const brand = brandCode === 'bm' ? 'bridgematch' : 'auctionbrain';
 
-          if (rvId && ['approve', 'reject'].includes(rvAction)) {
+          if (rvId && rvAction === 'approve') {
             try {
-              const status = rvAction === 'approve' ? 'approved' : 'rejected';
-              await updateBlogPostStatus(rvId, status, {}, brand);
-
-              const emoji = rvAction === 'approve' ? 'APPROVED' : 'REJECTED';
+              await updateBlogPostStatus(rvId, 'approved', {}, brand);
               const originalCaption = cb.message?.caption || cb.message?.text || '';
-              await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\n${emoji}`);
-              await answerCallback(cb.id, `${contentType} ${status}`);
+              await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\nAPPROVED`);
+              await answerCallback(cb.id, `${contentType} approved`);
 
               // Cross-pollinate: create seed from approved blog/guide
-              if (rvAction === 'approve') {
-                try {
-                  const blogPost = await getBlogPostById(rvId, brand);
-                  await saveSeed({
-                    source: 'blog_approved',
-                    summary: `New ${contentType}: ${blogPost.title}`,
-                    key_points: blogPost.summary || blogPost.meta_description || '',
-                    brand: blogPost.brand || brand,
-                    tags: blogPost.tags || []
-                  });
-                  console.log(`[Cross-pollinate] Seed created from ${contentType}: ${blogPost.title}`);
-                } catch (seedErr) {
-                  console.error(`[Cross-pollinate] Seed creation failed: ${seedErr.message}`);
-                }
+              try {
+                const blogPost = await getBlogPostById(rvId, brand);
+                await saveSeed({
+                  source: 'blog_approved',
+                  summary: `New ${contentType}: ${blogPost.title}`,
+                  key_points: blogPost.summary || blogPost.meta_description || '',
+                  brand: blogPost.brand || brand,
+                  tags: blogPost.tags || []
+                });
+                console.log(`[Cross-pollinate] Seed created from ${contentType}: ${blogPost.title}`);
+              } catch (seedErr) {
+                console.error(`[Cross-pollinate] Seed creation failed: ${seedErr.message}`);
               }
 
-              console.log(`[Telegram] ${brand} ${contentType} ${rvId} ${status}`);
+              console.log(`[Telegram] ${brand} ${contentType} ${rvId} approved`);
             } catch (err) {
-              console.error(`[Telegram] Error handling rv callback: ${err.message}`);
+              console.error(`[Telegram] Error handling approve: ${err.message}`);
               await answerCallback(cb.id, 'Error — try again');
             }
+          }
+
+          if (rvId && rvAction === 'reject') {
+            // Don't reject immediately — ask for a reason first so future
+            // generations can avoid the same failure mode. The text-message
+            // handler below sees pendingRejection and processes the reply.
+            pendingRejection = {
+              type: contentType,
+              postId: rvId,
+              chatId: cb.message.chat.id,
+              messageId: cb.message.message_id,
+              brand,
+              contentType,
+              originalCaption: cb.message?.caption || cb.message?.text || ''
+            };
+            await answerCallback(cb.id, 'Why?');
+            await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+            console.log(`[Telegram] Rejection reason requested for ${brand} ${contentType} ${rvId}`);
           }
 
           if (rvId && rvAction === 'revise') {
@@ -766,21 +780,32 @@ async function pollTelegram() {
           postId = parts[1];
         }
 
-        if (postId && ['approve', 'reject'].includes(action)) {
+        if (postId && action === 'approve') {
           try {
-            const status = action === 'approve' ? 'approved' : 'rejected';
-            await updatePostStatus(postId, status);
-
-            const emoji = action === 'approve' ? 'APPROVED' : 'REJECTED';
+            await updatePostStatus(postId, 'approved');
             const originalCaption = cb.message?.caption || cb.message?.text || '';
-            await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\n${emoji}`);
-            await answerCallback(cb.id, `Post ${status}`);
-
-            console.log(`[Telegram] Post ${postId} ${status}`);
+            await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\nAPPROVED`);
+            await answerCallback(cb.id, 'Post approved');
+            console.log(`[Telegram] Post ${postId} approved`);
           } catch (err) {
-            console.error(`[Telegram] Error handling callback: ${err.message}`);
+            console.error(`[Telegram] Error handling approve: ${err.message}`);
             await answerCallback(cb.id, 'Error — try again');
           }
+        }
+
+        if (postId && action === 'reject') {
+          // Same as blog/guide reject — capture a reason so future generation
+          // learns from this failure mode. Text-message handler processes the reply.
+          pendingRejection = {
+            type: 'social',
+            postId,
+            chatId: cb.message.chat.id,
+            messageId: cb.message.message_id,
+            originalCaption: cb.message?.caption || cb.message?.text || ''
+          };
+          await answerCallback(cb.id, 'Why?');
+          await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          console.log(`[Telegram] Rejection reason requested for social ${postId}`);
         }
 
         if (postId && action === 'revise') {
@@ -1024,6 +1049,50 @@ or
           } catch (err) {
             console.error(`[Telegram] Schedule error: ${err.message}`);
             await sendNotification(`Couldn't schedule: ${err.message}. Try again — type a time or click another button.`);
+          }
+          continue;
+        }
+
+        // Handle pending rejection reason — user clicked Reject and is now telling
+        // us why. Save the reason to revision_feedback (the same column we use for
+        // edit feedback — it's the editor's voice either way) and finalise the
+        // status to 'rejected'. The reason gets surfaced to the LLM next time it
+        // generates a post in the same cluster, so future drafts learn from this.
+        if (pendingRejection && !text.startsWith('/')) {
+          const rej = pendingRejection;
+          pendingRejection = null;
+          const reason = text.trim().toLowerCase() === 'skip' ? null : text.trim();
+          try {
+            const stamp = reason
+              ? `${rej.originalCaption}\n\nREJECTED · ${reason.slice(0, 200)}`
+              : `${rej.originalCaption}\n\nREJECTED`;
+
+            if (rej.type === 'social') {
+              const { supabase } = require('./lib/supabase');
+              const { error } = await supabase.from('posts').update({
+                status: 'rejected',
+                rejection_feedback: reason,
+              }).eq('id', rej.postId);
+              if (error) throw new Error(error.message);
+            } else {
+              // Blog/guide — route through updateBlogPostStatus so the
+              // missing-column retry handles BM's schema gaps.
+              const { updateBlogPostStatus } = require('./lib/supabase');
+              await updateBlogPostStatus(rej.postId, 'rejected',
+                reason ? { revision_feedback: reason } : {},
+                rej.brand || 'auctionbrain');
+            }
+
+            try {
+              await removeButtons(rej.chatId, rej.messageId, stamp);
+            } catch {}
+            await sendNotification(reason
+              ? `Rejected. Feedback captured — the next ${rej.contentType || rej.type} draft will avoid this.`
+              : 'Rejected (no feedback).');
+            console.log(`[Telegram] ${rej.type} ${rej.postId} rejected${reason ? ' with feedback' : ''}`);
+          } catch (err) {
+            console.error(`[Telegram] Reject error: ${err.message}`);
+            await sendNotification(`Couldn't save the rejection: ${err.message}. Try clicking Reject again.`);
           }
           continue;
         }
