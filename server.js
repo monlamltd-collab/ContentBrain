@@ -445,24 +445,46 @@ cron.schedule('*/5 * * * *', async () => {
   for (const { name, client } of clients) {
     try {
       // Two cases publish:
-      //   1. status='approved' AND scheduled_for is NULL  (= "approve now",
+      //   1. status='approved' AND scheduled_for IS NULL   (= "approve now",
       //      no specific time chosen — most Telegram approvals)
       //   2. status='approved' AND scheduled_for <= now    (= delayed schedule)
+      //
       // Previously this only handled case 2, so case-1 posts sat in 'approved'
-      // forever. PostgREST `or` filter syntax: comma-separated conditions.
-      const { data, error } = await client
+      // forever. We tried .or('scheduled_for.is.null,scheduled_for.lte.<iso>')
+      // but the ISO timestamp's colons/dots tripped PostgREST's filter parser
+      // (returned "column does not exist"). Two separate updates are reliable.
+
+      const allPublished = [];
+
+      // Case 1: approved + no schedule → publish immediately
+      const r1 = await client
         .from('blog_posts')
         .update({ status: 'published', published_at: nowIso })
         .eq('status', 'approved')
-        .or(`scheduled_for.is.null,scheduled_for.lte.${nowIso}`)
+        .is('scheduled_for', null)
         .select('id, title, brand');
-      if (error) {
-        console.error(`[scheduled-publish:${name}] update error: ${error.message}`);
-        continue;
+      if (r1.error) {
+        console.error(`[scheduled-publish:${name}] no-schedule update error: ${r1.error.message}`);
+      } else if (r1.data?.length) {
+        allPublished.push(...r1.data);
       }
-      if (data?.length) {
-        console.log(`[scheduled-publish:${name}] published ${data.length} blog/guide post(s):`);
-        for (const p of data) {
+
+      // Case 2: approved + scheduled time has passed
+      const r2 = await client
+        .from('blog_posts')
+        .update({ status: 'published', published_at: nowIso })
+        .eq('status', 'approved')
+        .lte('scheduled_for', nowIso)
+        .select('id, title, brand');
+      if (r2.error) {
+        console.error(`[scheduled-publish:${name}] scheduled update error: ${r2.error.message}`);
+      } else if (r2.data?.length) {
+        allPublished.push(...r2.data);
+      }
+
+      if (allPublished.length) {
+        console.log(`[scheduled-publish:${name}] published ${allPublished.length} blog/guide post(s):`);
+        for (const p of allPublished) {
           console.log(`  - ${p.brand || '?'}: ${p.title}`);
           try {
             await sendNotification(`<b>Published</b> (${p.brand || 'unknown'}): ${p.title}`);
