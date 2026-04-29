@@ -444,11 +444,17 @@ cron.schedule('*/5 * * * *', async () => {
 
   for (const { name, client } of clients) {
     try {
+      // Two cases publish:
+      //   1. status='approved' AND scheduled_for is NULL  (= "approve now",
+      //      no specific time chosen — most Telegram approvals)
+      //   2. status='approved' AND scheduled_for <= now    (= delayed schedule)
+      // Previously this only handled case 2, so case-1 posts sat in 'approved'
+      // forever. PostgREST `or` filter syntax: comma-separated conditions.
       const { data, error } = await client
         .from('blog_posts')
         .update({ status: 'published', published_at: nowIso })
         .eq('status', 'approved')
-        .lte('scheduled_for', nowIso)
+        .or(`scheduled_for.is.null,scheduled_for.lte.${nowIso}`)
         .select('id, title, brand');
       if (error) {
         console.error(`[scheduled-publish:${name}] update error: ${error.message}`);
