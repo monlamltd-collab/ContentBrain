@@ -7,8 +7,403 @@ const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrie
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
 const reviewRouter = require('./lib/review-api');
+const runtimeConfig = require('./lib/runtime-config');
+const { brands: defaultBrands, templateTypes } = require('./lib/config');
 
-const app = express();
+// HTML-escape user-supplied strings before echoing them in Telegram
+// notifications (sendNotification uses parse_mode HTML).
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Whitespace-aware tokeniser: splits on runs of whitespace but keeps
+// the rest of the line intact when only the first N tokens are needed.
+// e.g. cmdTokens('/tone bridgematch sharp, stoic', 2) ->
+//   ['/tone', 'bridgematch', 'sharp, stoic']
+function cmdTokens(text, fixedHead = 1) {
+  const trimmed = text.trim();
+  const parts = [];
+  let cursor = 0;
+  for (let i = 0; i < fixedHead; i++) {
+    while (cursor < trimmed.length && /\s/.test(trimmed[cursor])) cursor++;
+    const start = cursor;
+    while (cursor < trimmed.length && !/\s/.test(trimmed[cursor])) cursor++;
+    if (start === cursor) break;
+    parts.push(trimmed.slice(start, cursor));
+  }
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor])) cursor++;
+  if (cursor < trimmed.length) parts.push(trimmed.slice(cursor));
+  return parts;
+}
+
+// Validate brand argument against the brands defined in lib/config.js.
+function requireBrand(arg) {
+  const brand = (arg || '').toLowerCase().trim();
+  if (!defaultBrands[brand]) {
+    throw new Error(`Unknown brand "${arg}". Use one of: ${Object.keys(defaultBrands).join(', ')}.`);
+  }
+  return brand;
+}
+
+// ── Lever command dispatcher ───────────────────────────────────────────
+// Returns true when the command was a recognised lever command (so the
+// caller knows to `continue` past the conversational fallback). Throws
+// on user error so the caller can echo a friendly message.
+async function handleLeverCommand(text /* , msg */) {
+  const head = text.split(/\s+/, 1)[0];
+
+  // /levers — full snapshot
+  if (head === '/levers') {
+    const [activeBrands, weights, hooks, ctas, allRows] = await Promise.all([
+      runtimeConfig.getActiveBrands(),
+      runtimeConfig.getTemplateWeights(),
+      runtimeConfig.getHookPatterns(),
+      runtimeConfig.getCtaPatterns(),
+      runtimeConfig.loadAllLevers(),
+    ]);
+
+    const lines = [
+      `<b>Levers snapshot</b>`,
+      ``,
+      `<b>Active brands:</b> ${escapeHtml(activeBrands.join(', ') || '(none)')}`,
+      `<b>Template weights:</b> ${templateTypes.map(t => `${t}=${weights[t] ?? 0}`).join(', ')}`,
+      `<b>Hook patterns:</b> ${hooks.length} (use /hooks to view)`,
+      `<b>CTA patterns:</b> ${ctas.length} (use /ctas to view)`,
+      ``,
+      `<b>Per-brand voice:</b>`,
+    ];
+
+    for (const brandKey of Object.keys(defaultBrands)) {
+      const resolved = await runtimeConfig.getResolvedBrand(brandKey);
+      lines.push(``);
+      lines.push(`<b>${escapeHtml(resolved.name)}</b>`);
+      lines.push(`tone: ${escapeHtml(resolved.tone || '(default)')}`);
+      lines.push(`audience: ${escapeHtml(resolved.audience || '(default)')}`);
+      lines.push(`messages: ${resolved.messages.length} item(s)`);
+      lines.push(`directive: ${resolved._directive ? escapeHtml(resolved._directive.slice(0, 80)) + (resolved._directive.length > 80 ? '…' : '') : '(none)'}`);
+    }
+
+    if (allRows.length) {
+      lines.push(``);
+      lines.push(`<i>${allRows.length} override row(s) in app_config.</i>`);
+    } else {
+      lines.push(``);
+      lines.push(`<i>No overrides — all values are from defaults in lib/config.js.</i>`);
+    }
+    await sendNotification(lines.join('\n'));
+    return true;
+  }
+
+  // /tone <brand> [new tone…]
+  if (head === '/tone') {
+    const [, brandArg, rest] = cmdTokens(text, 2);
+    if (!brandArg) {
+      await sendNotification(`Usage: <code>/tone &lt;brand&gt; [new tone…]</code>`);
+      return true;
+    }
+    const brand = requireBrand(brandArg);
+    if (!rest) {
+      const tone = await runtimeConfig.getBrandTone(brand);
+      await sendNotification(`<b>${defaultBrands[brand].name} tone</b>\n${escapeHtml(tone)}`);
+      return true;
+    }
+    if (rest.toLowerCase() === 'reset' || rest.toLowerCase() === 'clear') {
+      await runtimeConfig.clearLever(brand, 'tone');
+      await sendNotification(`Reset <b>${defaultBrands[brand].name}</b> tone to default.`);
+      return true;
+    }
+    await runtimeConfig.setLever(brand, 'tone', rest);
+    await sendNotification(`Updated <b>${defaultBrands[brand].name}</b> tone:\n${escapeHtml(rest)}`);
+    return true;
+  }
+
+  // /audience <brand> [new audience…]
+  if (head === '/audience') {
+    const [, brandArg, rest] = cmdTokens(text, 2);
+    if (!brandArg) {
+      await sendNotification(`Usage: <code>/audience &lt;brand&gt; [new audience…]</code>`);
+      return true;
+    }
+    const brand = requireBrand(brandArg);
+    if (!rest) {
+      const aud = await runtimeConfig.getBrandAudience(brand);
+      await sendNotification(`<b>${defaultBrands[brand].name} audience</b>\n${escapeHtml(aud)}`);
+      return true;
+    }
+    if (rest.toLowerCase() === 'reset' || rest.toLowerCase() === 'clear') {
+      await runtimeConfig.clearLever(brand, 'audience');
+      await sendNotification(`Reset <b>${defaultBrands[brand].name}</b> audience to default.`);
+      return true;
+    }
+    await runtimeConfig.setLever(brand, 'audience', rest);
+    await sendNotification(`Updated <b>${defaultBrands[brand].name}</b> audience:\n${escapeHtml(rest)}`);
+    return true;
+  }
+
+  // /messages <brand> [list | add <text> | rm <n> | reset]
+  if (head === '/messages') {
+    const [, brandArg, rest] = cmdTokens(text, 2);
+    if (!brandArg) {
+      await sendNotification(`Usage: <code>/messages &lt;brand&gt; [list | add &lt;text&gt; | rm &lt;n&gt; | reset]</code>`);
+      return true;
+    }
+    const brand = requireBrand(brandArg);
+    const sub = (rest || 'list').trim();
+    const subHead = sub.split(/\s+/, 1)[0].toLowerCase();
+    const subRest = sub.slice(subHead.length).trim();
+
+    if (subHead === 'list' || sub === '') {
+      const messages = await runtimeConfig.getBrandMessages(brand);
+      const body = messages.length
+        ? messages.map((m, i) => `${i + 1}. ${escapeHtml(m)}`).join('\n')
+        : '(no messages set)';
+      await sendNotification(`<b>${defaultBrands[brand].name} key messages</b>\n${body}`);
+      return true;
+    }
+    if (subHead === 'add') {
+      if (!subRest) throw new Error('Add what? Provide the message text.');
+      const next = await runtimeConfig.appendArrayLever(
+        brand, 'messages',
+        () => defaultBrands[brand].messages,
+        subRest
+      );
+      await sendNotification(`Added message #${next.length}: ${escapeHtml(subRest)}`);
+      return true;
+    }
+    if (subHead === 'rm' || subHead === 'remove' || subHead === 'delete') {
+      const idx = parseInt(subRest, 10);
+      if (Number.isNaN(idx) || idx < 1) throw new Error('Provide a 1-based index, e.g. /messages auctionbrain rm 2');
+      const next = await runtimeConfig.removeArrayLever(
+        brand, 'messages',
+        () => defaultBrands[brand].messages,
+        idx - 1
+      );
+      await sendNotification(`Removed message #${idx}. ${next.length} remaining.`);
+      return true;
+    }
+    if (subHead === 'reset' || subHead === 'clear') {
+      await runtimeConfig.clearLever(brand, 'messages');
+      await sendNotification(`Reset <b>${defaultBrands[brand].name}</b> messages to default.`);
+      return true;
+    }
+    throw new Error(`Unknown /messages subcommand "${subHead}". Try list / add / rm / reset.`);
+  }
+
+  // /directive <brand> [show | clear | <text…>]
+  if (head === '/directive') {
+    const [, brandArg, rest] = cmdTokens(text, 2);
+    if (!brandArg) {
+      await sendNotification(`Usage: <code>/directive &lt;brand&gt; [show | clear | &lt;text…&gt;]</code>`);
+      return true;
+    }
+    const brand = requireBrand(brandArg);
+    if (!rest || rest.toLowerCase() === 'show') {
+      const d = await runtimeConfig.getBrandDirective(brand);
+      await sendNotification(`<b>${defaultBrands[brand].name} directive</b>\n${d ? escapeHtml(d) : '(none)'}`);
+      return true;
+    }
+    if (rest.toLowerCase() === 'clear' || rest.toLowerCase() === 'reset' || rest.toLowerCase() === 'remove') {
+      await runtimeConfig.clearLever(brand, 'directive');
+      await sendNotification(`Cleared <b>${defaultBrands[brand].name}</b> directive.`);
+      return true;
+    }
+    await runtimeConfig.setLever(brand, 'directive', rest);
+    await sendNotification(`Updated <b>${defaultBrands[brand].name}</b> directive:\n${escapeHtml(rest)}`);
+    return true;
+  }
+
+  // /hooks [list | add <text> | rm <n> | reset]
+  if (head === '/hooks') {
+    const [, ...args] = cmdTokens(text, 2);
+    const sub = (args[0] || 'list').trim();
+    const subHead = sub.split(/\s+/, 1)[0].toLowerCase();
+    const subRest = sub.slice(subHead.length).trim();
+
+    if (subHead === 'list' || sub === '') {
+      const patterns = await runtimeConfig.getHookPatterns();
+      const lines = patterns.map((p, i) => `${i + 1}. [${escapeHtml(p.label)}] ${escapeHtml(p.body)}`);
+      await sendNotification(`<b>Hook patterns (${patterns.length})</b>\n${lines.join('\n') || '(empty)'}`);
+      return true;
+    }
+    if (subHead === 'add') {
+      if (!subRest) throw new Error('Add what? Provide the pattern text.');
+      const { label, count } = await runtimeConfig.addHookPattern(subRest);
+      await sendNotification(`Added hook pattern <b>${escapeHtml(label)}</b> (${count} total).`);
+      return true;
+    }
+    if (subHead === 'rm' || subHead === 'remove' || subHead === 'delete') {
+      const idx = parseInt(subRest, 10);
+      if (Number.isNaN(idx) || idx < 1) throw new Error('Provide a 1-based index, e.g. /hooks rm 4');
+      const next = await runtimeConfig.removeHookPattern(idx - 1);
+      await sendNotification(`Removed hook pattern #${idx}. ${next.length} remaining.`);
+      return true;
+    }
+    if (subHead === 'reset' || subHead === 'clear') {
+      await runtimeConfig.clearLever('global', 'hook_patterns');
+      await sendNotification(`Reset hook patterns to defaults.`);
+      return true;
+    }
+    throw new Error(`Unknown /hooks subcommand "${subHead}". Try list / add / rm / reset.`);
+  }
+
+  // /ctas [list | add <text> | rm <n> | reset]
+  if (head === '/ctas') {
+    const [, ...args] = cmdTokens(text, 2);
+    const sub = (args[0] || 'list').trim();
+    const subHead = sub.split(/\s+/, 1)[0].toLowerCase();
+    const subRest = sub.slice(subHead.length).trim();
+
+    if (subHead === 'list' || sub === '') {
+      const patterns = await runtimeConfig.getCtaPatterns();
+      const lines = patterns.map((p, i) => `${i + 1}. [${escapeHtml(p.label)}] ${escapeHtml(p.body)}`);
+      await sendNotification(`<b>CTA patterns (${patterns.length})</b>\n${lines.join('\n') || '(empty)'}`);
+      return true;
+    }
+    if (subHead === 'add') {
+      if (!subRest) throw new Error('Add what? Provide the pattern text.');
+      const { label, count } = await runtimeConfig.addCtaPattern(subRest);
+      await sendNotification(`Added CTA pattern <b>${escapeHtml(label)}</b> (${count} total).`);
+      return true;
+    }
+    if (subHead === 'rm' || subHead === 'remove' || subHead === 'delete') {
+      const idx = parseInt(subRest, 10);
+      if (Number.isNaN(idx) || idx < 1) throw new Error('Provide a 1-based index, e.g. /ctas rm 3');
+      const next = await runtimeConfig.removeCtaPattern(idx - 1);
+      await sendNotification(`Removed CTA pattern #${idx}. ${next.length} remaining.`);
+      return true;
+    }
+    if (subHead === 'reset' || subHead === 'clear') {
+      await runtimeConfig.clearLever('global', 'cta_patterns');
+      await sendNotification(`Reset CTA patterns to defaults.`);
+      return true;
+    }
+    throw new Error(`Unknown /ctas subcommand "${subHead}". Try list / add / rm / reset.`);
+  }
+
+  // /active [list | add <brand> | rm <brand>]
+  if (head === '/active') {
+    const [, ...args] = cmdTokens(text, 2);
+    const sub = (args[0] || 'list').trim();
+    const subHead = sub.split(/\s+/, 1)[0].toLowerCase();
+    const subRest = sub.slice(subHead.length).trim();
+
+    if (subHead === 'list' || sub === '') {
+      const list = await runtimeConfig.getActiveBrands();
+      await sendNotification(`<b>Active brands:</b> ${escapeHtml(list.join(', ') || '(none)')}`);
+      return true;
+    }
+    if (subHead === 'add') {
+      const brand = requireBrand(subRest);
+      const current = await runtimeConfig.getActiveBrands();
+      if (current.includes(brand)) {
+        await sendNotification(`<b>${defaultBrands[brand].name}</b> is already active.`);
+        return true;
+      }
+      const next = [...current, brand];
+      await runtimeConfig.setLever('global', 'active_brands', next);
+      await sendNotification(`Activated <b>${defaultBrands[brand].name}</b>. Active: ${next.join(', ')}.`);
+      return true;
+    }
+    if (subHead === 'rm' || subHead === 'remove' || subHead === 'delete') {
+      const brand = requireBrand(subRest);
+      const current = await runtimeConfig.getActiveBrands();
+      const next = current.filter(b => b !== brand);
+      await runtimeConfig.setLever('global', 'active_brands', next);
+      await sendNotification(`Deactivated <b>${defaultBrands[brand].name}</b>. Active: ${next.join(', ') || '(none)'}.`);
+      return true;
+    }
+    if (subHead === 'reset' || subHead === 'clear') {
+      await runtimeConfig.clearLever('global', 'active_brands');
+      await sendNotification(`Reset active brands to default.`);
+      return true;
+    }
+    throw new Error(`Unknown /active subcommand "${subHead}". Try list / add / rm / reset.`);
+  }
+
+  // /templates [show | <type> <weight>]
+  if (head === '/templates') {
+    const [, ...args] = cmdTokens(text, 3);
+    const sub = (args[0] || 'show').trim().toLowerCase();
+    const arg2 = args[1];
+
+    if (sub === 'show' || sub === 'list' || sub === '') {
+      const w = await runtimeConfig.getTemplateWeights();
+      const body = templateTypes.map(t => `${t}: ${w[t] ?? 0}`).join('\n');
+      await sendNotification(`<b>Template weights</b>\n${body}\n\n<i>Higher weight = more frequent. Set zero to disable. e.g. <code>/templates reel 3</code></i>`);
+      return true;
+    }
+    if (sub === 'reset' || sub === 'clear') {
+      await runtimeConfig.clearLever('global', 'template_weights');
+      await sendNotification(`Reset template weights to default (all 1).`);
+      return true;
+    }
+    if (templateTypes.includes(sub)) {
+      const weight = parseFloat(arg2);
+      if (Number.isNaN(weight) || weight < 0) throw new Error('Provide a non-negative number, e.g. /templates reel 3');
+      const current = await runtimeConfig.getTemplateWeights();
+      const next = { ...current, [sub]: weight };
+      await runtimeConfig.setLever('global', 'template_weights', next);
+      const body = templateTypes.map(t => `${t}: ${next[t] ?? 0}`).join('\n');
+      await sendNotification(`Updated weights:\n${body}`);
+      return true;
+    }
+    throw new Error(`Unknown /templates argument "${sub}". Use one of: ${templateTypes.join(', ')}, or "show" / "reset".`);
+  }
+
+  // /regen — alias for /generate. Future: take optional brand arg.
+  if (head === '/regen') {
+    // Re-emit a /generate message into our own dispatcher by setting
+    // text and falling through. Simpler: handle it identically here.
+    try {
+      await sendNotification('Generating posts now...');
+      const { generateBatch } = require('./lib/generate');
+      const { renderPost } = require('./lib/renderer');
+      const { renderVideo } = require('./lib/video-renderer');
+
+      const posts = await generateBatch();
+      for (const post of posts) {
+        try {
+          const { filename } = await renderPost(post.template_type, post.brand, post);
+          let videoFilename = null;
+          try {
+            const video = await renderVideo(post.template_type, post.brand, post);
+            videoFilename = video.filename;
+          } catch (videoErr) {
+            console.warn(`  Video render skipped: ${videoErr.message}`);
+          }
+
+          const scheduledFor = new Date();
+          scheduledFor.setHours(scheduledFor.getHours() + 1, 0, 0, 0);
+
+          const saved = await insertPost({
+            brand: post.brand,
+            platform: post.platform,
+            template_type: post.template_type,
+            copy_headline: post.copy_headline,
+            copy_body: post.copy_body,
+            copy_cta: post.copy_cta,
+            image_url: filename,
+            video_url: videoFilename,
+            status: 'draft',
+            scheduled_for: scheduledFor.toISOString()
+          });
+          await sendPostForReview(saved);
+        } catch (err) {
+          console.error(`  Error: ${err.message}`);
+        }
+      }
+      console.log(`[Telegram] /regen completed: ${posts.length} posts`);
+    } catch (err) {
+      await sendNotification(`Generate failed: ${err.message}`);
+    }
+    return true;
+  }
+
+  return false;
+}
 const PORT = process.env.PORT || 3000;
 const PASSWORD = process.env.REVIEW_UI_PASSWORD;
 
@@ -1431,7 +1826,7 @@ Classify this request. Return JSON:
           continue;
         }
 
-        // /status — quick overview
+        // /status — quick overview + active levers summary
         if (text === '/status') {
           try {
             const drafts = await getDraftPosts();
@@ -1439,12 +1834,35 @@ Classify this request. Return JSON:
             const { getPendingBriefs } = require('./lib/supabase');
             const briefs = await getPendingBriefs();
             const pubMethod = process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED';
+
+            // Lever summary — single round-trip, no Promise.all so a
+            // failure on one read doesn't sink the whole status output.
+            let leverBlock = '';
+            try {
+              const [activeBrands, weights, hooks, ctas] = await Promise.all([
+                runtimeConfig.getActiveBrands(),
+                runtimeConfig.getTemplateWeights(),
+                runtimeConfig.getHookPatterns(),
+                runtimeConfig.getCtaPatterns(),
+              ]);
+              const weightLine = templateTypes.map(t => `${t}=${weights[t] ?? 0}`).join(' ');
+              leverBlock =
+                `\n\n<b>Levers</b>\n` +
+                `Active: ${escapeHtml(activeBrands.join(', ') || '(none)')}\n` +
+                `Templates: ${weightLine}\n` +
+                `Patterns: ${hooks.length} hooks, ${ctas.length} CTAs\n` +
+                `<i>/levers for full snapshot · /help for commands</i>`;
+            } catch (e) {
+              console.warn(`[/status] lever read failed: ${e.message}`);
+            }
+
             await sendNotification(
               `<b>ContentBrain Status</b>\n\n` +
               `Drafts awaiting review: ${drafts.length}\n` +
               `Approved (ready to publish): ${approved.length}\n` +
               `Pending briefs: ${briefs.length}\n` +
-              `Publishing via: ${pubMethod}`
+              `Publishing via: ${pubMethod}` +
+              leverBlock
             );
           } catch (err) {
             await sendNotification(`Status check failed: ${err.message}`);
@@ -1456,13 +1874,47 @@ Classify this request. Return JSON:
         if (text === '/help') {
           await sendNotification(
             `<b>ContentBrain Commands</b>\n\n` +
+            `<b>Operations</b>\n` +
             `/generate — create new posts now\n` +
+            `/regen [brand] — alias for /generate\n` +
             `/publish — publish all approved posts now\n` +
-            `/status — check drafts, approved, briefs\n` +
-            `/help — show this message\n\n` +
+            `/status — drafts, approved, briefs + active levers\n` +
+            `/levers — full snapshot of every tunable lever\n\n` +
+            `<b>Brand voice</b> (brand = auctionbrain | bridgematch)\n` +
+            `/tone &lt;brand&gt; [new tone…]\n` +
+            `/audience &lt;brand&gt; [new audience…]\n` +
+            `/messages &lt;brand&gt; [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n` +
+            `/directive &lt;brand&gt; [show | clear | &lt;text…&gt;]\n\n` +
+            `<b>Pattern menus</b>\n` +
+            `/hooks [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n` +
+            `/ctas  [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n\n` +
+            `<b>Mix</b>\n` +
+            `/active [list | add &lt;brand&gt; | rm &lt;brand&gt;]\n` +
+            `/templates [show | &lt;type&gt; &lt;weight&gt;]   types: stat hook list reel\n\n` +
             `Or just chat — send text ideas, photos of articles, or URLs and I'll save them as content seeds for future posts. Send a video to create a watermarked post.`
           );
           continue;
+        }
+
+        // ── RUNTIME CONFIG LEVERS ─────────────────────────────────
+        // All of the following commands mutate rows in app_config (see
+        // migrations/006-app-config.sql) and bust the runtime-config
+        // cache so the next /generate picks them up immediately.
+        // Defined here, *before* the unknown-command guard, so unknown
+        // /commands still get silently dropped.
+
+        if (text.startsWith('/levers') || text.startsWith('/tone') || text.startsWith('/audience') ||
+            text.startsWith('/messages') || text.startsWith('/hooks') || text.startsWith('/ctas') ||
+            text.startsWith('/active') || text.startsWith('/templates') ||
+            text.startsWith('/directive') || text.startsWith('/regen')) {
+          try {
+            const handled = await handleLeverCommand(text, msg);
+            if (handled) continue;
+          } catch (err) {
+            console.error(`[Telegram] Lever command error: ${err.message}`);
+            await sendNotification(`<b>Error</b>\n${escapeHtml(err.message)}`);
+            continue;
+          }
         }
 
         // Unknown command
