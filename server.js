@@ -8,6 +8,7 @@ const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
 const reviewRouter = require('./lib/review-api');
 const runtimeConfig = require('./lib/runtime-config');
+const authorsLib = require('./lib/authors');
 const { brands: defaultBrands, templateTypes } = require('./lib/config');
 
 // HTML-escape user-supplied strings before echoing them in Telegram
@@ -57,14 +58,16 @@ async function handleLeverCommand(text /* , msg */) {
 
   // /levers — full snapshot
   if (head === '/levers') {
-    const [activeBrands, weights, hooks, ctas, allRows] = await Promise.all([
+    const [activeBrands, weights, hooks, ctas, allRows, authors] = await Promise.all([
       runtimeConfig.getActiveBrands(),
       runtimeConfig.getTemplateWeights(),
       runtimeConfig.getHookPatterns(),
       runtimeConfig.getCtaPatterns(),
       runtimeConfig.loadAllLevers(),
+      authorsLib.listAuthors(),
     ]);
 
+    const activeAuthors = authors.filter(a => a.active);
     const lines = [
       `<b>Levers snapshot</b>`,
       ``,
@@ -72,6 +75,7 @@ async function handleLeverCommand(text /* , msg */) {
       `<b>Template weights:</b> ${templateTypes.map(t => `${t}=${weights[t] ?? 0}`).join(', ')}`,
       `<b>Hook patterns:</b> ${hooks.length} (use /hooks to view)`,
       `<b>CTA patterns:</b> ${ctas.length} (use /ctas to view)`,
+      `<b>Ghost-writers:</b> ${activeAuthors.length} active / ${authors.length} total (use /authors)`,
       ``,
       `<b>Per-brand voice:</b>`,
     ];
@@ -353,6 +357,148 @@ async function handleLeverCommand(text /* , msg */) {
     throw new Error(`Unknown /templates argument "${sub}". Use one of: ${templateTypes.join(', ')}, or "show" / "reset".`);
   }
 
+  // /authors (or /author) — manage ghost-writer personas.
+  // Subcommands: list | add <name> <voice…> | show <name> | tone <name> <text>
+  //              directive <name> <text> | weight <name> <n> | brand <name> <brand|all>
+  //              pause <name> | resume <name> | rm <name>
+  if (head === '/authors' || head === '/author') {
+    const [, ...args] = cmdTokens(text, 2);
+    const sub = (args[0] || 'list').trim();
+    const subHead = sub.split(/\s+/, 1)[0].toLowerCase();
+    const subRest = sub.slice(subHead.length).trim();
+
+    if (subHead === 'list' || sub === '') {
+      const list = await authorsLib.listAuthors();
+      if (!list.length) {
+        await sendNotification(
+          `<b>No ghost-writers yet.</b>\n\n` +
+          `Add one: <code>/authors add StoicUncle world-weary, monetarily literate, fond of long sentences</code>\n\n` +
+          `When no authors exist, posts use plain brand voice.`
+        );
+        return true;
+      }
+      const lines = list.map(a => {
+        const status = a.active ? '' : ' [paused]';
+        const scope = (Array.isArray(a.brands) && a.brands.length) ? a.brands.join('+') : 'roaming';
+        const tone = a.tone ? a.tone.slice(0, 60) + (a.tone.length > 60 ? '…' : '') : '(no tone set)';
+        return `<b>${escapeHtml(a.name)}</b>${status} · w=${a.weight} · ${scope}\n   ${escapeHtml(tone)}`;
+      });
+      await sendNotification(`<b>Ghost-writers (${list.length})</b>\n\n${lines.join('\n\n')}`);
+      return true;
+    }
+
+    if (subHead === 'add') {
+      // /authors add <Name> <voice text…>
+      const nameToken = subRest.split(/\s+/, 1)[0];
+      const rest = subRest.slice(nameToken.length).trim();
+      if (!nameToken) throw new Error('Usage: /authors add <Name> <voice description…>');
+      const created = await authorsLib.createAuthor({
+        name: nameToken,
+        tone: rest || null,
+      });
+      await sendNotification(
+        `Added <b>${escapeHtml(created.name)}</b> (roaming, weight 1).\n` +
+        (rest ? `Voice: ${escapeHtml(rest)}` : '<i>No voice set yet — use /authors tone &lt;name&gt; &lt;text&gt;</i>')
+      );
+      return true;
+    }
+
+    if (subHead === 'show') {
+      const name = subRest.trim();
+      if (!name) throw new Error('Usage: /authors show <Name>');
+      const a = await authorsLib.getAuthor(name);
+      if (!a) throw new Error(`No author "${name}".`);
+      const scope = (Array.isArray(a.brands) && a.brands.length) ? a.brands.join(', ') : 'roaming (any active brand)';
+      await sendNotification(
+        `<b>${escapeHtml(a.name)}</b> ${a.active ? '' : '[paused]'}\n` +
+        `Weight: ${a.weight}\n` +
+        `Brands: ${escapeHtml(scope)}\n` +
+        `Tone: ${escapeHtml(a.tone || '(not set)')}\n` +
+        `Directive: ${escapeHtml(a.directive || '(none)')}`
+      );
+      return true;
+    }
+
+    if (subHead === 'tone') {
+      const name = subRest.split(/\s+/, 1)[0];
+      const value = subRest.slice(name.length).trim();
+      if (!name || !value) throw new Error('Usage: /authors tone <Name> <voice description…>');
+      await authorsLib.updateAuthor(name, { tone: value });
+      await sendNotification(`Updated <b>${escapeHtml(name)}</b> tone:\n${escapeHtml(value)}`);
+      return true;
+    }
+
+    if (subHead === 'directive') {
+      const name = subRest.split(/\s+/, 1)[0];
+      const value = subRest.slice(name.length).trim();
+      if (!name) throw new Error('Usage: /authors directive <Name> <text…> | clear');
+      if (!value || value.toLowerCase() === 'clear') {
+        await authorsLib.updateAuthor(name, { directive: null });
+        await sendNotification(`Cleared <b>${escapeHtml(name)}</b> directive.`);
+        return true;
+      }
+      await authorsLib.updateAuthor(name, { directive: value });
+      await sendNotification(`Updated <b>${escapeHtml(name)}</b> directive:\n${escapeHtml(value)}`);
+      return true;
+    }
+
+    if (subHead === 'weight') {
+      const name = subRest.split(/\s+/, 1)[0];
+      const numStr = subRest.slice(name.length).trim();
+      const w = parseFloat(numStr);
+      if (!name || Number.isNaN(w) || w < 0) throw new Error('Usage: /authors weight <Name> <non-negative number>');
+      await authorsLib.updateAuthor(name, { weight: w });
+      await sendNotification(`Set <b>${escapeHtml(name)}</b> weight to ${w}. (Higher weight = picked more often. 0 disables.)`);
+      return true;
+    }
+
+    if (subHead === 'brand') {
+      // /authors brand <name> <brandSlug | all | roaming>
+      const name = subRest.split(/\s+/, 1)[0];
+      const target = subRest.slice(name.length).trim().toLowerCase();
+      if (!name || !target) throw new Error('Usage: /authors brand <Name> <auctionbrain | bridgematch | all>');
+      let brands;
+      if (target === 'all' || target === 'roaming' || target === 'any') {
+        brands = null;
+      } else {
+        const validated = requireBrand(target);
+        brands = [validated];
+      }
+      await authorsLib.updateAuthor(name, { brands });
+      await sendNotification(`Scoped <b>${escapeHtml(name)}</b> to: ${brands ? brands.join(', ') : 'roaming (any active brand)'}.`);
+      return true;
+    }
+
+    if (subHead === 'pause') {
+      const name = subRest.trim();
+      if (!name) throw new Error('Usage: /authors pause <Name>');
+      await authorsLib.updateAuthor(name, { active: false });
+      await sendNotification(`Paused <b>${escapeHtml(name)}</b>. They'll be skipped in rotation until /authors resume.`);
+      return true;
+    }
+
+    if (subHead === 'resume') {
+      const name = subRest.trim();
+      if (!name) throw new Error('Usage: /authors resume <Name>');
+      await authorsLib.updateAuthor(name, { active: true });
+      await sendNotification(`Resumed <b>${escapeHtml(name)}</b>.`);
+      return true;
+    }
+
+    if (subHead === 'rm' || subHead === 'remove' || subHead === 'delete') {
+      const name = subRest.trim();
+      if (!name) throw new Error('Usage: /authors rm <Name>');
+      await authorsLib.deleteAuthor(name);
+      await sendNotification(`Deleted <b>${escapeHtml(name)}</b>.`);
+      return true;
+    }
+
+    throw new Error(
+      `Unknown /authors subcommand "${subHead}". Try:\n` +
+      `list, add, show, tone, directive, weight, brand, pause, resume, rm`
+    );
+  }
+
   // /regen — alias for /generate. Future: take optional brand arg.
   if (head === '/regen') {
     // Re-emit a /generate message into our own dispatcher by setting
@@ -378,6 +524,13 @@ async function handleLeverCommand(text /* , msg */) {
           const scheduledFor = new Date();
           scheduledFor.setHours(scheduledFor.getHours() + 1, 0, 0, 0);
 
+          // meta tracks hook/cta patterns + author for rotation and
+          // engagement attribution.
+          const meta = {};
+          if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
+          if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
+          if (post.author) meta.author = post.author;
+
           const saved = await insertPost({
             brand: post.brand,
             platform: post.platform,
@@ -388,7 +541,8 @@ async function handleLeverCommand(text /* , msg */) {
             image_url: filename,
             video_url: videoFilename,
             status: 'draft',
-            scheduled_for: scheduledFor.toISOString()
+            scheduled_for: scheduledFor.toISOString(),
+            meta
           });
           await sendPostForReview(saved);
         } catch (err) {
@@ -747,12 +901,14 @@ async function runGenerate() {
         scheduledFor.setDate(scheduledFor.getDate() + daysAhead + 1);
         scheduledFor.setHours(hour, 0, 0, 0);
 
-        // meta carries generation-time fields (hook_pattern, cta_pattern) so
-        // future generations can rotate properly and the admin can chart
-        // pattern-level performance once Facebook insights have caught up.
+        // meta carries generation-time fields (hook_pattern, cta_pattern,
+        // author) so future generations can rotate properly and the
+        // admin can chart pattern-/author-level performance once
+        // Facebook insights have caught up.
         const meta = {};
         if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
         if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
+        if (post.author) meta.author = post.author;
 
         const saved = await insertPost({
           brand: post.brand,
@@ -1775,6 +1931,11 @@ Classify this request. Return JSON:
                 const scheduledFor = new Date();
                 scheduledFor.setHours(scheduledFor.getHours() + 1, 0, 0, 0);
 
+                const meta = {};
+                if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
+                if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
+                if (post.author) meta.author = post.author;
+
                 const saved = await insertPost({
                   brand: post.brand,
                   platform: post.platform,
@@ -1785,7 +1946,8 @@ Classify this request. Return JSON:
                   image_url: filename,
                   video_url: videoFilename,
                   status: 'draft',
-                  scheduled_for: scheduledFor.toISOString()
+                  scheduled_for: scheduledFor.toISOString(),
+                  meta
                 });
                 await sendPostForReview(saved);
               } catch (err) {
@@ -1839,18 +2001,21 @@ Classify this request. Return JSON:
             // failure on one read doesn't sink the whole status output.
             let leverBlock = '';
             try {
-              const [activeBrands, weights, hooks, ctas] = await Promise.all([
+              const [activeBrands, weights, hooks, ctas, authors] = await Promise.all([
                 runtimeConfig.getActiveBrands(),
                 runtimeConfig.getTemplateWeights(),
                 runtimeConfig.getHookPatterns(),
                 runtimeConfig.getCtaPatterns(),
+                authorsLib.listAuthors(),
               ]);
               const weightLine = templateTypes.map(t => `${t}=${weights[t] ?? 0}`).join(' ');
+              const activeAuthors = authors.filter(a => a.active).length;
               leverBlock =
                 `\n\n<b>Levers</b>\n` +
                 `Active: ${escapeHtml(activeBrands.join(', ') || '(none)')}\n` +
                 `Templates: ${weightLine}\n` +
                 `Patterns: ${hooks.length} hooks, ${ctas.length} CTAs\n` +
+                `Ghost-writers: ${activeAuthors} active / ${authors.length} total\n` +
                 `<i>/levers for full snapshot · /help for commands</i>`;
             } catch (e) {
               console.warn(`[/status] lever read failed: ${e.message}`);
@@ -1891,6 +2056,14 @@ Classify this request. Return JSON:
             `<b>Mix</b>\n` +
             `/active [list | add &lt;brand&gt; | rm &lt;brand&gt;]\n` +
             `/templates [show | &lt;type&gt; &lt;weight&gt;]   types: stat hook list reel\n\n` +
+            `<b>Ghost-writers</b> (roaming personas)\n` +
+            `/authors [list | show &lt;Name&gt;]\n` +
+            `/authors add &lt;Name&gt; &lt;voice description…&gt;\n` +
+            `/authors tone &lt;Name&gt; &lt;text&gt;\n` +
+            `/authors directive &lt;Name&gt; &lt;text | clear&gt;\n` +
+            `/authors weight &lt;Name&gt; &lt;n&gt;     (0 = disabled)\n` +
+            `/authors brand &lt;Name&gt; &lt;brand | all&gt;\n` +
+            `/authors pause &lt;Name&gt; · resume &lt;Name&gt; · rm &lt;Name&gt;\n\n` +
             `Or just chat — send text ideas, photos of articles, or URLs and I'll save them as content seeds for future posts. Send a video to create a watermarked post.`
           );
           continue;
@@ -1906,7 +2079,8 @@ Classify this request. Return JSON:
         if (text.startsWith('/levers') || text.startsWith('/tone') || text.startsWith('/audience') ||
             text.startsWith('/messages') || text.startsWith('/hooks') || text.startsWith('/ctas') ||
             text.startsWith('/active') || text.startsWith('/templates') ||
-            text.startsWith('/directive') || text.startsWith('/regen')) {
+            text.startsWith('/directive') || text.startsWith('/regen') ||
+            text.startsWith('/authors') || text.startsWith('/author ') || text === '/author') {
           try {
             const handled = await handleLeverCommand(text, msg);
             if (handled) continue;
