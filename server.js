@@ -1263,7 +1263,18 @@ async function pollTelegram() {
 
   try {
     const res = await fetch(`${API}/getUpdates?offset=${telegramOffset}&timeout=30&allowed_updates=["callback_query","message"]`);
-    if (!res.ok) return;
+    if (!res.ok) {
+      // Don't bare-return here — that skips the setTimeout(pollTelegram, 1000)
+      // at the bottom and PERMANENTLY kills the poll loop. Process is alive
+      // (Express still answers /health) but no callback_query / message
+      // updates ever get processed again. This stale-poll-loop bug had us
+      // chasing "the buttons don't work" for hours. Telegram returns non-OK
+      // for plenty of recoverable reasons: 502/504 transients, 409 Conflict
+      // when another poller briefly overlaps a redeploy, 429 rate-limit on
+      // bursty traffic. All of those should just retry on the next tick.
+      console.warn(`[Telegram] getUpdates HTTP ${res.status}; will retry`);
+      throw new Error(`getUpdates HTTP ${res.status}`);
+    }
 
     const { result } = await res.json();
     for (const update of result) {
@@ -2448,6 +2459,43 @@ Classify this request. Return JSON:
   setTimeout(pollTelegram, 1000);
 }
 
+// Resend review cards for any blog/guide drafts so a stale-poll-loop
+// outage (or a Railway redeploy that landed mid-click) self-heals
+// within seconds of restart. Without this, drafts can sit forever
+// because Telegram doesn't queue callback_query updates the way it
+// queues messages — once the bot's polling loop dies, every button
+// press during the dead window is lost.
+async function resendDraftReviewCards() {
+  try {
+    const drafts = await getDraftBlogPosts().catch(() => []);
+    if (!drafts.length) return;
+    const { sendBlogForReview } = require('./lib/telegram');
+    const { getSourceArticlesForPost } = require('./lib/supabase');
+    let sent = 0;
+    for (const d of drafts) {
+      try {
+        const sources = await getSourceArticlesForPost(d.id, d.brand || 'auctionbrain').catch(() => []);
+        await sendBlogForReview({
+          post_id: d.id,
+          title: d.title,
+          summary: d.summary || d.meta_description || '',
+          score: d.evaluation_score,
+          word_count: d.word_count,
+          brand: d.brand || 'auctionbrain',
+          content_type: d.post_type === 'guide' ? 'guide' : 'blog',
+          sources,
+        });
+        sent++;
+      } catch (err) {
+        console.warn(`[startup] resend failed for ${d.id}: ${err.message}`);
+      }
+    }
+    if (sent) console.log(`[startup] resent ${sent} review card(s) for drafts`);
+  } catch (err) {
+    console.warn(`[startup] resendDraftReviewCards: ${err.message}`);
+  }
+}
+
 // ── START ──
 app.listen(PORT, async () => {
   console.log(`ContentBrain review UI running on port ${PORT}`);
@@ -2462,6 +2510,11 @@ app.listen(PORT, async () => {
     `Drafts: ${drafts.length} | Approved: ${approved.length}\n` +
     `Publishing: ${process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED'}`
   );
+
+  // Self-heal: if any blog/guide drafts have stale buttons (because the
+  // poll loop was dead when you tried to click them), re-send fresh
+  // review cards now so the next click actually fires.
+  await resendDraftReviewCards();
 
   pollTelegram();
 });
