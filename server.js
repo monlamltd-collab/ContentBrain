@@ -558,6 +558,7 @@ async function handleLeverCommand(text /* , msg */) {
 
   return false;
 }
+const app = express();
 const PORT = process.env.PORT || 3000;
 const PASSWORD = process.env.REVIEW_UI_PASSWORD;
 
