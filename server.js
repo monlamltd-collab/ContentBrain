@@ -2511,6 +2511,24 @@ app.listen(PORT, async () => {
     `Publishing: ${process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED'}`
   );
 
+  // Defensive: if a stray webhook is set on the bot token, getUpdates
+  // returns 409 Conflict on every poll and inbound callback_query
+  // updates vanish. Outbound sends still work, so the bug is invisible
+  // from outside (health=200, sendMessage=200, but button presses go
+  // to the void). Deleting any existing webhook on startup is a no-op
+  // when none is set. drop_pending_updates=false preserves any genuine
+  // queued message updates that survived the webhook→polling switch.
+  try {
+    if (BOT_TOKEN) {
+      const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=false`);
+      const j = await r.json();
+      if (j.ok) console.log(`[startup] deleteWebhook: ${j.description || 'ok'}`);
+      else console.warn(`[startup] deleteWebhook failed: ${JSON.stringify(j)}`);
+    }
+  } catch (err) {
+    console.warn(`[startup] deleteWebhook error: ${err.message}`);
+  }
+
   // Self-heal: if any blog/guide drafts have stale buttons (because the
   // poll loop was dead when you tried to click them), re-send fresh
   // review cards now so the next click actually fires.
