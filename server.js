@@ -592,6 +592,47 @@ app.use((req, res, next) => {
 // Health check (no auth — used by Railway)
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// /diag — proves whether the Telegram polling loop is actually alive.
+// pollLastAt should be < ~32s ago in a healthy state (long-poll = 30s
+// timeout + setTimeout + handler time). pollCount should be increasing
+// across requests. Anything else means polling is dead and clicks are
+// going to /dev/null. Also fetches the bot's own getMe + webhook info
+// for a one-shot diagnostic.
+app.get('/diag', async (req, res) => {
+  const now = Date.now();
+  const out = {
+    process_uptime_s: Math.round(process.uptime()),
+    poll: {
+      last_at_iso: pollLastAt ? new Date(pollLastAt).toISOString() : null,
+      seconds_since_last_poll: pollLastAt ? Math.round((now - pollLastAt) / 1000) : null,
+      total_polls: pollCount,
+      last_error: pollLastError,
+      offset: telegramOffset,
+    },
+    telegram: { ok: false },
+  };
+  try {
+    if (BOT_TOKEN) {
+      const [me, wh] = await Promise.all([
+        fetch(`${API}/getMe`).then(r => r.json()),
+        fetch(`${API}/getWebhookInfo`).then(r => r.json()),
+      ]);
+      out.telegram = {
+        ok: !!me.ok,
+        username: me.result?.username,
+        webhook_url: wh.result?.url || '',
+        pending_update_count: wh.result?.pending_update_count,
+        last_error: wh.result?.last_error_message || null,
+      };
+    } else {
+      out.telegram.error = 'BOT_TOKEN not set';
+    }
+  } catch (err) {
+    out.telegram.error = err.message;
+  }
+  res.json(out);
+});
+
 // Review API (auth via API key, not session cookie)
 app.use('/api', reviewRouter);
 
@@ -1065,6 +1106,14 @@ cron.schedule('0 20 * * *', async () => {
 // Listen for approve/reject button presses
 
 let telegramOffset = 0;
+// Polling heartbeat — exposed via /diag so we can prove from outside
+// whether the loop is actually alive on the deployed instance.
+// pollLastAt: ms timestamp of last getUpdates response (success OR error).
+// pollCount:  total iterations since process start.
+// pollLastError: most recent error message (or null if last poll was OK).
+let pollLastAt = 0;
+let pollCount = 0;
+let pollLastError = null;
 let pendingRevision = null; // { postId, messageId, chatId, contentType?, brand? }
 let pendingSchedule = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption? }
 let pendingRejection = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption?, contentType? }
@@ -1260,6 +1309,10 @@ Return ONLY this JSON (no commentary, no markdown fences):
 
 async function pollTelegram() {
   if (!BOT_TOKEN) return;
+
+  pollCount++;
+  pollLastAt = Date.now();
+  pollLastError = null;
 
   try {
     const res = await fetch(`${API}/getUpdates?offset=${telegramOffset}&timeout=30&allowed_updates=["callback_query","message"]`);
@@ -2454,6 +2507,7 @@ Classify this request. Return JSON:
     }
   } catch (err) {
     // Silence network errors, will retry next poll
+    pollLastError = err.message;
   }
 
   setTimeout(pollTelegram, 1000);
