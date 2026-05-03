@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
 const { timingSafeEqual } = require('crypto');
-const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById } = require('./lib/supabase');
+const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById, getPublishedBlogPostsBothBrands, getPendingBriefsAll, dismissBrief } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
 const reviewRouter = require('./lib/review-api');
@@ -2550,6 +2550,152 @@ async function resendDraftReviewCards() {
     console.warn(`[startup] resendDraftReviewCards: ${err.message}`);
   }
 }
+
+// ── EDITORIAL DASHBOARD ──────────────────────────────────────────────────────
+
+const Anthropic = require('@anthropic-ai/sdk');
+const _anthropicForEditorial = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY });
+const SUPPORTED_IMAGE_TYPES_ED = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+app.get('/content', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'editorial.html'));
+});
+
+app.get('/api/content/coverage', requireAuth, async (req, res) => {
+  try {
+    const posts = await getPublishedBlogPostsBothBrands();
+    const brand = req.query.brand; // optional filter
+
+    const filtered = brand ? posts.filter(p => p.brand === brand) : posts;
+
+    // Build tag frequency map
+    const tagCount = {};
+    for (const post of filtered) {
+      const tags = Array.isArray(post.tags) ? post.tags : [];
+      for (const tag of tags) {
+        tagCount[tag] = (tagCount[tag] || 0) + 1;
+      }
+    }
+
+    // Classify: 0 = gap, 1-2 = covered, 3+ = saturated
+    const coverage = Object.entries(tagCount)
+      .map(([tag, count]) => ({
+        tag,
+        count,
+        status: count >= 3 ? 'saturated' : 'covered'
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    res.json({ posts: filtered.length, coverage });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/content/queue', requireAuth, async (req, res) => {
+  try {
+    const drafts = await getDraftBlogPosts();
+    res.json({ drafts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/content/briefs', requireAuth, async (req, res) => {
+  try {
+    const briefs = await getPendingBriefsAll();
+    res.json({ briefs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/content/brief', requireAuth, async (req, res) => {
+  try {
+    const { brand, message, topic, angle } = req.body;
+    if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
+    const brief = await saveBrief({ brand: brand || null, message: message.trim(), topic: topic || null, angle: angle || null });
+    res.json({ ok: true, brief });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/content/brief/:id/dismiss', requireAuth, async (req, res) => {
+  try {
+    await dismissBrief(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/content/seed', requireAuth, async (req, res) => {
+  try {
+    const { brand, content, title } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: 'content is required' });
+    const seed = await saveSeed({ brand: brand || null, content: content.trim(), title: title?.trim() || null });
+    res.json({ ok: true, seed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Accepts { mimeType, data (base64), filename } — extracts content via Claude
+app.post('/api/content/upload', requireAuth, async (req, res) => {
+  try {
+    const { mimeType, data, filename } = req.body;
+    if (!data) return res.status(400).json({ error: 'data (base64) is required' });
+
+    const isPdf = mimeType === 'application/pdf';
+    const isImage = SUPPORTED_IMAGE_TYPES_ED.includes(mimeType);
+    if (!isPdf && !isImage) return res.status(400).json({ error: `Unsupported type: ${mimeType}` });
+
+    const contentBlock = isPdf
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } }
+      : { type: 'image', source: { type: 'base64', media_type: mimeType, data } };
+
+    const response = await _anthropicForEditorial.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      messages: [{
+        role: 'user',
+        content: [
+          contentBlock,
+          { type: 'text', text: 'Extract all useful editorial content from this document — headlines, article text, statistics, quotes, opinions. Format as clean markdown. Skip ads, subscription offers, navigation, and page numbers.' }
+        ]
+      }]
+    });
+
+    const extracted = response.content[0]?.text || '';
+    if (extracted.length < 20) return res.status(422).json({ error: 'Could not extract readable content' });
+
+    res.json({ ok: true, extracted, filename });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/content/approve/:brand/:id', requireAuth, async (req, res) => {
+  try {
+    const { brand, id } = req.params;
+    await updateBlogPostStatus(id, 'approved', {}, brand);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/content/reject/:brand/:id', requireAuth, async (req, res) => {
+  try {
+    const { brand, id } = req.params;
+    const { feedback } = req.body;
+    await updateBlogPostStatus(id, 'rejected', { revision_feedback: feedback || '' }, brand);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── START ──
 app.listen(PORT, async () => {
