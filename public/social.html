@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Social — ContentBrain</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --navy: #1a2b4b;
+    --green: #0f8a5f;
+    --green-light: #e6f5f0;
+    --amber: #f59e0b;
+    --amber-light: #fef3c7;
+    --red: #c0392b;
+    --red-light: #fdecea;
+    --cream: #faf8f4;
+    --grey: #f0eeea;
+    --border: #e2dfd8;
+    --text: #1a2b4b;
+    --muted: #6b7280;
+    --font: 'IBM Plex Sans', Arial, sans-serif;
+    --mono: 'IBM Plex Mono', monospace;
+  }
+
+  body { font-family: var(--font); background: var(--cream); color: var(--text); min-height: 100vh; }
+
+  header {
+    background: var(--navy); color: white; padding: 0 2rem; height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; letter-spacing: 0.02em; }
+  header .nav { display: flex; gap: 1.5rem; align-items: center; }
+  header .nav a {
+    color: rgba(255,255,255,0.65); text-decoration: none;
+    font-size: 0.82rem; font-weight: 500; transition: color 0.15s;
+  }
+  header .nav a:hover { color: white; }
+  header .nav a.active { color: white; }
+  header span.ts { font-size: 0.78rem; opacity: 0.5; font-family: var(--mono); }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+
+  .page-title { font-size: 1.25rem; font-weight: 700; color: var(--navy); margin-bottom: 0.35rem; }
+  .page-sub { font-size: 0.85rem; color: var(--muted); margin-bottom: 1.75rem; }
+
+  .filters { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; align-items: center; flex-wrap: wrap; }
+  .filter-btn {
+    font-family: var(--font); font-size: 0.78rem; font-weight: 500;
+    padding: 0.3rem 0.85rem; border-radius: 999px;
+    border: 1.5px solid var(--border); background: white; cursor: pointer; transition: all 0.15s;
+  }
+  .filter-btn:hover { border-color: var(--green); color: var(--green); }
+  .filter-btn.active { background: var(--navy); color: white; border-color: var(--navy); }
+  .filter-sep { width: 1px; height: 18px; background: var(--border); margin: 0 0.25rem; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 1.25rem; }
+
+  .card {
+    background: white; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column; transition: box-shadow 0.15s;
+  }
+  .card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.07); }
+
+  .card-media {
+    background: #111; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 180px; overflow: hidden;
+  }
+  .card-media video, .card-media img {
+    max-width: 100%; max-height: 320px; display: block; object-fit: contain;
+  }
+  .media-placeholder { color: rgba(255,255,255,0.3); font-size: 0.8rem; font-family: var(--mono); padding: 2rem; }
+  .video-badge {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(0,0,0,0.6); color: white;
+    font-size: 0.65rem; font-family: var(--mono); font-weight: 500;
+    padding: 0.2rem 0.45rem; border-radius: 4px;
+  }
+
+  .card-body { padding: 1rem 1rem 0; flex: 1; display: flex; flex-direction: column; gap: 0.75rem; }
+
+  .card-meta { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .chip {
+    font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; padding: 0.2rem 0.5rem; border-radius: 4px;
+  }
+  .chip.auctionbrain { background: #e8edf5; color: var(--navy); }
+  .chip.bridgematch { background: #e6f5f0; color: #0d5c40; }
+  .chip.template { background: var(--grey); color: var(--muted); }
+  .chip.platform { background: #eef2ff; color: #3730a3; }
+  .card-date { font-size: 0.72rem; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+
+  .copy-fields { display: flex; flex-direction: column; gap: 0.5rem; }
+  .copy-field label {
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--muted); display: block; margin-bottom: 0.2rem;
+  }
+  .copy-field textarea {
+    width: 100%; font-family: var(--font); font-size: 0.85rem; color: var(--text);
+    border: 1.5px solid var(--border); border-radius: 6px; padding: 0.5rem 0.65rem;
+    resize: vertical; min-height: 2.5rem; line-height: 1.45; transition: border-color 0.15s;
+  }
+  .copy-field textarea:focus { outline: none; border-color: var(--green); }
+  .copy-field textarea.headline { font-weight: 600; }
+  .charcount { font-size: 0.68rem; color: var(--muted); font-family: var(--mono); text-align: right; }
+  .charcount.warn { color: var(--amber); }
+  .charcount.over { color: var(--red); }
+
+  .card-actions { padding: 0.875rem 1rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+  .btn {
+    font-family: var(--font); font-size: 0.78rem; font-weight: 600;
+    padding: 0.45rem 0.9rem; border-radius: 6px; border: none;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-save { background: var(--grey); color: var(--text); border: 1.5px solid var(--border); }
+  .btn-save:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+  .btn-rerender { background: #ede9fe; color: #5b21b6; border: 1.5px solid #c4b5fd; }
+  .btn-rerender:hover:not(:disabled) { background: #ddd6fe; }
+  .btn-approve { background: var(--green); color: white; }
+  .btn-approve:hover:not(:disabled) { background: #0d7a54; }
+  .btn-reject { background: white; color: var(--red); border: 1.5px solid #f5c6c2; }
+  .btn-reject:hover:not(:disabled) { background: var(--red-light); }
+
+  .reject-box { display: none; flex-direction: column; gap: 0.5rem; }
+  .reject-box.open { display: flex; }
+  .reject-box textarea {
+    width: 100%; font-family: var(--font); font-size: 0.82rem; color: var(--text);
+    border: 1.5px solid #f5c6c2; border-radius: 6px; padding: 0.5rem 0.65rem;
+    resize: vertical; min-height: 3rem;
+  }
+  .reject-box textarea:focus { outline: none; border-color: var(--red); }
+  .reject-confirm { display: flex; gap: 0.5rem; }
+
+  .card.dismissed { opacity: 0; transform: scale(0.96); transition: all 0.3s; pointer-events: none; }
+
+  .status-bar {
+    font-size: 0.75rem; font-family: var(--mono); padding: 0.3rem 0.65rem;
+    border-radius: 4px; display: none;
+  }
+  .status-bar.show { display: block; }
+  .status-bar.ok { background: var(--green-light); color: #0d5c40; }
+  .status-bar.err { background: var(--red-light); color: var(--red); }
+
+  .empty { text-align: center; padding: 4rem 2rem; color: var(--muted); font-size: 0.9rem; grid-column: 1/-1; }
+  .empty strong { display: block; font-size: 1.1rem; color: var(--text); margin-bottom: 0.5rem; }
+
+  #toast {
+    position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 999;
+    background: var(--navy); color: white; font-size: 0.82rem;
+    padding: 0.65rem 1.1rem; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    opacity: 0; transform: translateY(6px); transition: all 0.25s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.error { background: var(--red); }
+
+  @media (max-width: 700px) { main { padding: 1rem; } .cards { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ContentBrain — Social</h1>
+  <nav class="nav">
+    <a href="/content">Blog Editorial</a>
+    <a href="/social" class="active">Social Posts</a>
+    <a href="/">Review UI</a>
+  </nav>
+  <span class="ts" id="updated-at"></span>
+</header>
+
+<main>
+  <div class="page-title">Draft Social Posts</div>
+  <div class="page-sub">Edit copy, re-render visuals, then approve or reject.</div>
+
+  <div class="filters" id="filters">
+    <span style="font-size:0.78rem;color:var(--muted);font-weight:500;">Brand:</span>
+    <button class="filter-btn active" data-brand="all" onclick="setFilter('brand',this)">All</button>
+    <button class="filter-btn" data-brand="auctionbrain" onclick="setFilter('brand',this)">AuctionBrain</button>
+    <button class="filter-btn" data-brand="bridgematch" onclick="setFilter('brand',this)">BridgeMatch</button>
+    <span class="filter-sep"></span>
+    <span style="font-size:0.78rem;color:var(--muted);font-weight:500;">Type:</span>
+    <button class="filter-btn active" data-type="all" onclick="setFilter('type',this)">All</button>
+    <button class="filter-btn" data-type="reel" onclick="setFilter('type',this)">Reel</button>
+    <button class="filter-btn" data-type="stat" onclick="setFilter('type',this)">Stat</button>
+    <button class="filter-btn" data-type="hook" onclick="setFilter('type',this)">Hook</button>
+    <button class="filter-btn" data-type="list" onclick="setFilter('type',this)">List</button>
+  </div>
+
+  <div class="cards" id="cards-container"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const state = { posts: [], brandFilter: 'all', typeFilter: 'all' };
+
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = ''; }, 3200);
+}
+
+async function api(method, path, body) {
+  const opts = { method, credentials: 'include', headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'HTTP ' + res.status);
+  return json;
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function setFilter(dim, btn) {
+  btn.parentElement.querySelectorAll('[data-' + dim + ']').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  state[dim + 'Filter'] = btn.dataset[dim];
+  renderCards();
+}
+
+async function load() {
+  try {
+    const { drafts } = await api('GET', '/api/social/queue');
+    state.posts = drafts || [];
+    document.getElementById('updated-at').textContent = 'Updated ' + new Date().toLocaleTimeString('en-GB');
+    renderCards();
+  } catch (err) {
+    toast('Failed to load: ' + err.message, true);
+    showEmpty('Error loading drafts', err.message);
+  }
+}
+
+function clearContainer() {
+  const c = document.getElementById('cards-container');
+  while (c.firstChild) c.removeChild(c.firstChild);
+  return c;
+}
+
+function showEmpty(title, sub) {
+  const c = clearContainer();
+  const wrap = document.createElement('div');
+  wrap.className = 'empty';
+  const h = document.createElement('strong');
+  h.textContent = title;
+  const p = document.createElement('p');
+  p.textContent = sub || '';
+  wrap.appendChild(h);
+  if (sub) wrap.appendChild(p);
+  c.appendChild(wrap);
+}
+
+function renderCards() {
+  let posts = state.posts;
+  if (state.brandFilter !== 'all') posts = posts.filter(p => p.brand === state.brandFilter);
+  if (state.typeFilter !== 'all') posts = posts.filter(p => p.template_type === state.typeFilter);
+
+  if (!posts.length) {
+    const sub = (state.brandFilter !== 'all' || state.typeFilter !== 'all')
+      ? 'Try changing the filters above.'
+      : 'Generation runs automatically — check back later.';
+    showEmpty('No drafts waiting', sub);
+    return;
+  }
+
+  const c = clearContainer();
+  posts.forEach(post => c.appendChild(buildCard(post)));
+}
+
+function makeMediaBlock(post) {
+  const media = document.createElement('div');
+  media.className = 'card-media';
+  if (post.video_url) {
+    const vid = document.createElement('video');
+    vid.src = '/output/' + post.video_url;
+    vid.controls = true;
+    vid.muted = true;
+    vid.preload = 'metadata';
+    media.appendChild(vid);
+    const badge = document.createElement('span');
+    badge.className = 'video-badge';
+    badge.textContent = 'MP4';
+    media.appendChild(badge);
+  } else if (post.image_url) {
+    const img = document.createElement('img');
+    img.src = '/output/' + post.image_url;
+    img.alt = '';
+    media.appendChild(img);
+  } else {
+    const ph = document.createElement('div');
+    ph.className = 'media-placeholder';
+    ph.textContent = 'no preview';
+    media.appendChild(ph);
+  }
+  return media;
+}
+
+function buildCard(post) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = 'card-' + post.id;
+
+  card.appendChild(makeMediaBlock(post));
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'card-body';
+
+  // Meta chips
+  const metaRow = document.createElement('div');
+  metaRow.className = 'card-meta';
+  [
+    { cls: 'chip ' + (post.brand || 'auctionbrain'), text: post.brand || 'auctionbrain' },
+    { cls: 'chip template', text: post.template_type || '—' },
+    { cls: 'chip platform', text: post.platform || '—' },
+  ].forEach(({ cls, text }) => {
+    const c = document.createElement('span');
+    c.className = cls;
+    c.textContent = text;
+    metaRow.appendChild(c);
+  });
+  const dateEl = document.createElement('span');
+  dateEl.className = 'card-date';
+  dateEl.textContent = fmtDate(post.created_at);
+  metaRow.appendChild(dateEl);
+  body.appendChild(metaRow);
+
+  // Copy fields
+  const copyWrap = document.createElement('div');
+  copyWrap.className = 'copy-fields';
+  [
+    { key: 'copy_headline', label: 'Headline', max: 100, cls: 'headline', rows: 2 },
+    { key: 'copy_body',     label: 'Body',     max: 300, cls: '',         rows: 3 },
+    { key: 'copy_cta',      label: 'CTA',      max: 80,  cls: '',         rows: 2 },
+  ].forEach(({ key, label, max, cls, rows }) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'copy-field';
+    const lbl = document.createElement('label');
+    lbl.textContent = label;
+    const ta = document.createElement('textarea');
+    if (cls) ta.className = cls;
+    ta.rows = rows;
+    ta.dataset.key = key;
+    ta.value = post[key] || '';
+    const count = document.createElement('div');
+    count.className = 'charcount';
+    updateCount(count, ta.value.length, max);
+    ta.addEventListener('input', () => updateCount(count, ta.value.length, max));
+    wrap.appendChild(lbl);
+    wrap.appendChild(ta);
+    wrap.appendChild(count);
+    copyWrap.appendChild(wrap);
+  });
+  body.appendChild(copyWrap);
+
+  const statusBar = document.createElement('div');
+  statusBar.className = 'status-bar';
+  statusBar.id = 'status-' + post.id;
+  body.appendChild(statusBar);
+  card.appendChild(body);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+
+  const topRow = document.createElement('div');
+  topRow.className = 'btn-row';
+  const btnSave = document.createElement('button');
+  btnSave.className = 'btn btn-save';
+  btnSave.textContent = 'Save copy';
+  btnSave.onclick = () => saveCopy(post.id, card, btnSave);
+  topRow.appendChild(btnSave);
+
+  if (post.template_type === 'reel' || post.video_url) {
+    const btnRender = document.createElement('button');
+    btnRender.className = 'btn btn-rerender';
+    btnRender.textContent = 'Re-render';
+    btnRender.onclick = () => rerender(post.id, card, btnRender);
+    topRow.appendChild(btnRender);
+  }
+  actions.appendChild(topRow);
+
+  const bottomRow = document.createElement('div');
+  bottomRow.className = 'btn-row';
+  const btnApprove = document.createElement('button');
+  btnApprove.className = 'btn btn-approve';
+  btnApprove.textContent = 'Approve';
+  btnApprove.onclick = () => approve(post.id, card);
+  const btnReject = document.createElement('button');
+  btnReject.className = 'btn btn-reject';
+  btnReject.textContent = 'Reject…';
+  btnReject.onclick = () => toggleRejectBox(post.id);
+  bottomRow.appendChild(btnApprove);
+  bottomRow.appendChild(btnReject);
+  actions.appendChild(bottomRow);
+
+  const rejectBox = document.createElement('div');
+  rejectBox.className = 'reject-box';
+  rejectBox.id = 'reject-' + post.id;
+  const rejectTa = document.createElement('textarea');
+  rejectTa.placeholder = 'Optional feedback for next generation run…';
+  rejectTa.rows = 2;
+  rejectBox.appendChild(rejectTa);
+  const confirmRow = document.createElement('div');
+  confirmRow.className = 'reject-confirm';
+  const btnConfirm = document.createElement('button');
+  btnConfirm.className = 'btn btn-reject';
+  btnConfirm.textContent = 'Confirm reject';
+  btnConfirm.onclick = () => reject(post.id, card, rejectTa.value);
+  const btnCancel = document.createElement('button');
+  btnCancel.className = 'btn btn-save';
+  btnCancel.textContent = 'Cancel';
+  btnCancel.onclick = () => toggleRejectBox(post.id);
+  confirmRow.appendChild(btnConfirm);
+  confirmRow.appendChild(btnCancel);
+  rejectBox.appendChild(confirmRow);
+  actions.appendChild(rejectBox);
+
+  card.appendChild(actions);
+  return card;
+}
+
+function updateCount(el, len, max) {
+  el.textContent = len + ' / ' + max;
+  el.className = 'charcount' + (len > max ? ' over' : len > max * 0.85 ? ' warn' : '');
+}
+
+function showStatus(id, msg, isErr) {
+  const el = document.getElementById('status-' + id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'status-bar show ' + (isErr ? 'err' : 'ok');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'status-bar'; }, 3500);
+}
+
+async function saveCopy(id, card, btn) {
+  const body = {};
+  card.querySelectorAll('textarea[data-key]').forEach(ta => { body[ta.dataset.key] = ta.value; });
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await api('PATCH', '/api/social/posts/' + id + '/copy', body);
+    showStatus(id, '✓ Copy saved');
+    toast('Copy saved');
+  } catch (err) {
+    showStatus(id, '✗ ' + err.message, true);
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save copy';
+  }
+}
+
+async function rerender(id, card, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Rendering…';
+  try {
+    const { image_url, video_url } = await api('POST', '/api/social/posts/' + id + '/rerender');
+    // Replace media block in-place
+    const oldMedia = card.querySelector('.card-media');
+    const newMedia = makeMediaBlock({ image_url, video_url });
+    // bust cache
+    if (video_url) {
+      newMedia.querySelector('video').src += '?t=' + Date.now();
+    } else if (image_url) {
+      newMedia.querySelector('img').src += '?t=' + Date.now();
+    }
+    card.replaceChild(newMedia, oldMedia);
+    showStatus(id, '✓ Re-rendered');
+    toast('Re-rendered successfully');
+  } catch (err) {
+    showStatus(id, '✗ ' + err.message, true);
+    toast('Re-render failed: ' + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Re-render';
+  }
+}
+
+async function approve(id, card) {
+  try {
+    await api('POST', '/api/social/posts/' + id + '/approve');
+    toast('Approved ✓');
+    card.classList.add('dismissed');
+    setTimeout(() => card.remove(), 320);
+  } catch (err) {
+    toast('Approve failed: ' + err.message, true);
+  }
+}
+
+function toggleRejectBox(id) {
+  document.getElementById('reject-' + id).classList.toggle('open');
+}
+
+async function reject(id, card, feedback) {
+  try {
+    await api('POST', '/api/social/posts/' + id + '/reject', { feedback });
+    toast('Rejected');
+    card.classList.add('dismissed');
+    setTimeout(() => card.remove(), 320);
+  } catch (err) {
+    toast('Reject failed: ' + err.message, true);
+  }
+}
+
+load();
+</script>
+</body>
+</html>
