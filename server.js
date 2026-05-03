@@ -643,20 +643,21 @@ function requireAuth(req, res, next) {
   const token = req.cookies?.auth || req.query.token || req.headers['x-auth-token'];
   if (PASSWORD && safeEqual(token, PASSWORD)) return next();
 
-  // Show login form
-  if (req.method === 'GET' && req.path === '/') {
-    return res.send(loginPage());
+  // Show login form for page routes
+  if (req.method === 'GET' && (req.path === '/' || req.path === '/content')) {
+    return res.send(loginPage(null, req.path));
   }
   return res.status(401).json({ error: 'Unauthorized' });
 }
 
 // ── LOGIN ──
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+  const returnTo = (req.body.returnTo || '/').replace(/[^a-zA-Z0-9/_-]/g, '');
   if (PASSWORD && safeEqual(req.body.password, PASSWORD)) {
     res.setHeader('Set-Cookie', `auth=${PASSWORD}; HttpOnly; Path=/; Max-Age=86400`);
-    return res.redirect('/');
+    return res.redirect(returnTo || '/');
   }
-  res.status(401).send(loginPage('Wrong password'));
+  res.status(401).send(loginPage('Wrong password', returnTo));
 });
 
 // ── DASHBOARD ──
@@ -730,7 +731,7 @@ app.post('/api/blog-posts/:id/reject', requireAuth, async (req, res) => {
 
 // ── HTML PAGES ──
 
-function loginPage(error) {
+function loginPage(error, returnTo = '/') {
   return `<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -750,6 +751,7 @@ function loginPage(error) {
   <h1>ContentBrain</h1>
   ${error ? `<div class="error">${error}</div>` : ''}
   <form method="POST" action="/login">
+    <input type="hidden" name="returnTo" value="${returnTo}">
     <input type="password" name="password" placeholder="Password" autofocus>
     <button type="submit">Sign in</button>
   </form>
