@@ -898,6 +898,19 @@ let lastGenerateDate = null;
 // Generate new content daily at 7am (with wake-up resilience)
 cron.schedule('0 7 * * *', runGenerate);
 
+// Promote high-engagement Reddit threads to briefs daily at 06:30 UTC,
+// 30 minutes before the content engines kick off — so any newly-promoted
+// briefs are picked up by that day's generation runs.
+cron.schedule('30 6 * * *', async () => {
+  try {
+    const { promoteRedditThreadsToBriefs } = require('./lib/reddit-briefs');
+    const result = await promoteRedditThreadsToBriefs();
+    console.log(`[cron:reddit-briefs] ${result.promoted} promoted, ${result.evaluated} evaluated (${result.reason})`);
+  } catch (err) {
+    console.warn('[cron:reddit-briefs] failed:', err.message);
+  }
+});
+
 // Check on wake — if we missed today's generation, run it now
 cron.schedule('*/30 * * * *', async () => {
   const today = new Date().toISOString().slice(0, 10);
@@ -2618,6 +2631,19 @@ app.post('/api/content/brief', requireAuth, async (req, res) => {
     if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
     const brief = await saveBrief({ brand: brand || null, message: message.trim(), topic: topic || null, angle: angle || null });
     res.json({ ok: true, brief });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual trigger for the Reddit-thread → brief promotion. Same logic as
+// the daily cron at 06:30 UTC, exposed so the editor can pull fresh briefs
+// on demand from the Brief Queue panel.
+app.post('/api/content/refresh-reddit-briefs', requireAuth, async (req, res) => {
+  try {
+    const { promoteRedditThreadsToBriefs } = require('./lib/reddit-briefs');
+    const result = await promoteRedditThreadsToBriefs();
+    res.json({ ok: true, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

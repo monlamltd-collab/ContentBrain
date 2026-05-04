@@ -432,7 +432,10 @@
   <div class="panel">
     <div class="panel-header">
       <h2>Brief Queue</h2>
-      <button class="btn btn-outline btn-sm" onclick="loadBriefs()">↻ Refresh</button>
+      <div style="display:flex; gap:0.4rem;">
+        <button class="btn btn-outline btn-sm" onclick="refreshFromReddit(this)" title="Pull high-engagement Reddit threads into the brief queue">⟲ From Reddit</button>
+        <button class="btn btn-outline btn-sm" onclick="loadBriefs()">↻ Refresh</button>
+      </div>
     </div>
     <div class="panel-body">
       <div id="briefs-body"><div class="empty"><span class="spinner"></span> Loading...</div></div>
@@ -928,6 +931,32 @@ async function saveExtracted() {
 }
 
 // ── PANEL D: BRIEF QUEUE ──
+
+async function refreshFromReddit(btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Scanning Reddit…';
+  try {
+    const result = await api('POST', '/api/content/refresh-reddit-briefs');
+    if (result.promoted > 0) {
+      toast(`Added ${result.promoted} brief${result.promoted === 1 ? '' : 's'} from Reddit ✓`);
+      await loadBriefs();
+    } else if (result.reason === 'no_bm_client') {
+      toast('BridgeMatch Supabase not configured', true);
+    } else if (result.reason === 'all_below_threshold') {
+      toast(`No high-value threads (${result.evaluated} scanned)`);
+    } else if (result.reason === 'no_threads') {
+      toast('No recent Reddit threads to evaluate');
+    } else {
+      toast('No new briefs to add');
+    }
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
 
 async function loadBriefs() {
   const el = document.getElementById('briefs-body');
