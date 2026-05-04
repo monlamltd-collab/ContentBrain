@@ -36,6 +36,13 @@
     position: sticky; top: 0; z-index: 100;
   }
   header h1 { font-size: 1rem; font-weight: 600; letter-spacing: 0.02em; }
+  header .nav { display: flex; gap: 1.5rem; align-items: center; }
+  header .nav a {
+    color: rgba(255,255,255,0.65); text-decoration: none;
+    font-size: 0.82rem; font-weight: 500; transition: color 0.15s;
+  }
+  header .nav a:hover { color: white; }
+  header .nav a.active { color: white; }
   header span { font-size: 0.8rem; opacity: 0.6; font-family: var(--mono); }
 
   main {
@@ -170,6 +177,11 @@
 
 <header>
   <h1>ContentBrain — Editorial</h1>
+  <nav class="nav">
+    <a href="/content" class="active">Blog Editorial</a>
+    <a href="/social">Social Posts</a>
+    <a href="/">Review UI</a>
+  </nav>
   <span id="last-updated"></span>
 </header>
 
