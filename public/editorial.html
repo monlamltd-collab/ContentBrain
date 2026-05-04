@@ -180,6 +180,52 @@
   #toast.error { background: var(--red); }
 
   .empty { text-align: center; padding: 2rem 1rem; color: var(--muted); font-size: 0.85rem; }
+
+  /* Tips strip — collapsed by default; one click to expand */
+  .tips-bar {
+    max-width: 1400px; margin: 1rem auto 0; padding: 0 2rem;
+  }
+  .tips {
+    background: white; border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; transition: box-shadow 0.15s;
+  }
+  .tips-toggle {
+    width: 100%; background: none; border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.75rem 1.25rem; font-family: var(--font);
+    font-size: 0.82rem; font-weight: 600; color: var(--navy);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .tips-toggle:hover { background: var(--cream); }
+  .tips-toggle .arrow { transition: transform 0.2s; font-family: var(--mono); }
+  .tips.open .tips-toggle .arrow { transform: rotate(90deg); }
+  .tips-body { display: none; padding: 0 1.25rem 1.25rem; }
+  .tips.open .tips-body { display: block; }
+  .tips-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem 1.5rem;
+  }
+  .tips-section h3 {
+    font-size: 0.78rem; font-weight: 700; color: var(--navy);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem;
+    padding-bottom: 0.25rem; border-bottom: 1.5px solid var(--green);
+    display: inline-block;
+  }
+  .tips-section ul {
+    list-style: none; padding: 0; margin: 0;
+    font-size: 0.83rem; line-height: 1.55; color: var(--text);
+  }
+  .tips-section li {
+    padding: 0.25rem 0 0.25rem 1rem; position: relative;
+  }
+  .tips-section li::before {
+    content: '→'; position: absolute; left: 0; top: 0.25rem;
+    color: var(--green); font-weight: 600;
+  }
+  .tips-section code {
+    background: var(--grey); padding: 0.05rem 0.3rem;
+    border-radius: 3px; font-family: var(--mono); font-size: 0.78rem;
+  }
   .spinner {
     display: inline-block; width: 18px; height: 18px;
     border: 2px solid var(--border); border-top-color: var(--green);
@@ -201,6 +247,80 @@
   </nav>
   <span id="last-updated"></span>
 </header>
+
+<div class="tips-bar">
+  <div class="tips" id="tips-strip">
+    <button class="tips-toggle" onclick="document.getElementById('tips-strip').classList.toggle('open')">
+      <span>Tips &amp; best practices</span>
+      <span class="arrow">›</span>
+    </button>
+    <div class="tips-body">
+      <div class="tips-grid">
+
+        <div class="tips-section">
+          <h3>Topic Coverage</h3>
+          <ul>
+            <li>Green chips = covered (1–2 posts). Amber = saturated (3+).</li>
+            <li>Aim new briefs at <strong>gaps</strong> — keywords with 0 posts.</li>
+            <li>New posts on saturated tags barely move SEO. Diminishing returns.</li>
+            <li>Filter by brand to spot gaps in one brand the other has covered.</li>
+          </ul>
+        </div>
+
+        <div class="tips-section">
+          <h3>Draft Queue</h3>
+          <ul>
+            <li><strong>Approve</strong> sends straight to publish. Be sure first.</li>
+            <li><strong>Amend</strong> opens an inline editor — fix title, summary, body.</li>
+            <li><strong>Reject</strong> with specific feedback — it's fed to next week's runs as "don't repeat this".</li>
+            <li>Watch for AI tells: "it's worth noting", "in conclusion", em-dashes everywhere. Amend before approving.</li>
+          </ul>
+        </div>
+
+        <div class="tips-section">
+          <h3>Add Content</h3>
+          <ul>
+            <li><strong>Notes</strong> → saved as briefs, steers the next generation run.</li>
+            <li><strong>Paste</strong> → article text becomes a source seed for future posts.</li>
+            <li><strong>Upload</strong> → PDF or photo of magazine. Claude extracts the editorial content.</li>
+            <li>You can also send URLs / photos / PDFs to the Telegram bot from your phone.</li>
+          </ul>
+        </div>
+
+        <div class="tips-section">
+          <h3>SEO leverage</h3>
+          <ul>
+            <li>The engine now does <strong>SERP analysis</strong> automatically — it sees what already ranks for the keyword and writes into the gap.</li>
+            <li>Best title format: specific + searchable, not clickbait.</li>
+            <li>800–1500 words is the sweet spot.</li>
+            <li>Aim for 2–3 internal links per post (the engine handles this).</li>
+          </ul>
+        </div>
+
+        <div class="tips-section">
+          <h3>Cadence</h3>
+          <ul>
+            <li>Review 2× per week — Mon + Thu is a good rhythm.</li>
+            <li>Aim for 2–3 published posts per brand per week.</li>
+            <li>Each rejected post compounds quality — be specific in feedback.</li>
+            <li>Reels: see <a href="/social" style="color:var(--green);">/social</a> — edit copy and re-render videos.</li>
+          </ul>
+        </div>
+
+        <div class="tips-section">
+          <h3>What NOT to do</h3>
+          <ul>
+            <li>Don't approve below 8/10 evaluation score without amending first.</li>
+            <li>Don't write briefs that just rephrase a saturated topic.</li>
+            <li>Don't reject without feedback — that's a wasted signal.</li>
+            <li>Don't approve fabricated stats or first-person claims. Amend or reject.</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
 
 <main>
 
