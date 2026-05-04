@@ -2678,6 +2678,62 @@ app.post('/api/content/upload', requireAuth, async (req, res) => {
   }
 });
 
+// Fetch the full blog post so the editor can amend it before approving.
+// Returns the row including content_md/content_html — heavier than the
+// queue listing, but only fired when the editor actually opens the amend form.
+app.get('/api/content/blog/:brand/:id', requireAuth, async (req, res) => {
+  try {
+    const { brand, id } = req.params;
+    const post = await getBlogPostById(id, brand);
+    res.json({ post });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Amend a draft blog post in-place. Updates whichever of title / summary /
+// content_md were sent in the body. content_html is regenerated from the
+// new content_md so the published version stays in sync — the landing
+// site renders content_html, not content_md.
+app.patch('/api/content/blog/:brand/:id', requireAuth, async (req, res) => {
+  try {
+    const { brand, id } = req.params;
+    const { title, summary, content_md } = req.body;
+    const updates = {};
+    if (typeof title === 'string') {
+      if (!title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
+      if (title.length > 200) return res.status(400).json({ error: 'title too long (max 200)' });
+      updates.title = title.trim();
+    }
+    if (typeof summary === 'string') {
+      if (summary.length > 500) return res.status(400).json({ error: 'summary too long (max 500)' });
+      updates.summary = summary.trim();
+    }
+    if (typeof content_md === 'string') {
+      if (!content_md.trim()) return res.status(400).json({ error: 'content cannot be empty' });
+      if (content_md.length > 50000) return res.status(400).json({ error: 'content too long (max 50k)' });
+      updates.content_md = content_md;
+      // Regenerate content_html from the amended markdown so the landing
+      // site (which reads content_html) doesn't fall behind.
+      try {
+        const { marked } = require('marked');
+        updates.content_html = marked.parse(content_md);
+      } catch (mdErr) {
+        return res.status(500).json({ error: `markdown render failed: ${mdErr.message}` });
+      }
+    }
+    if (!Object.keys(updates).length) return res.status(400).json({ error: 'No editable fields provided' });
+
+    const { getBlogClient } = require('./lib/supabase');
+    const client = getBlogClient(brand);
+    const { data, error } = await client.from('blog_posts').update(updates).eq('id', id).select().single();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, post: data, updated: Object.keys(updates) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/content/approve/:brand/:id', requireAuth, async (req, res) => {
   try {
     const { brand, id } = req.params;

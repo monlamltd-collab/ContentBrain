@@ -99,6 +99,23 @@
     width: 100%; font-family: var(--font); font-size: 0.8rem; padding: 0.5rem;
     border: 1px solid var(--border); border-radius: 4px; resize: vertical; min-height: 60px; margin-bottom: 0.4rem;
   }
+  .amend-form { margin-top: 0.6rem; display: none; flex-direction: column; gap: 0.5rem; }
+  .amend-form.open { display: flex; }
+  .amend-field label {
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.05em; color: var(--muted); display: block; margin-bottom: 0.2rem;
+  }
+  .amend-field input,
+  .amend-field textarea {
+    width: 100%; font-family: var(--font); font-size: 0.82rem; color: var(--text);
+    border: 1.5px solid var(--border); border-radius: 5px; padding: 0.45rem 0.6rem;
+    resize: vertical; line-height: 1.5;
+  }
+  .amend-field input:focus,
+  .amend-field textarea:focus { outline: none; border-color: var(--green); }
+  .amend-field textarea.body { font-family: var(--mono); font-size: 0.78rem; min-height: 220px; }
+  .amend-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+  .amend-loading { font-size: 0.78rem; color: var(--muted); padding: 0.5rem 0; }
 
   .btn {
     font-family: var(--font); font-size: 0.8rem; font-weight: 600;
@@ -484,12 +501,18 @@ function buildDraftCard(d) {
   approveBtn.textContent = '✓ Approve';
   approveBtn.onclick = () => approveDraft(brand, d.id, approveBtn);
 
+  const amendBtn = document.createElement('button');
+  amendBtn.className = 'btn btn-outline btn-sm';
+  amendBtn.textContent = '✎ Amend';
+  amendBtn.onclick = () => toggleAmend(brand, d.id, card, amendBtn);
+
   const rejectBtn = document.createElement('button');
   rejectBtn.className = 'btn btn-outline btn-sm';
   rejectBtn.textContent = '✗ Reject';
   rejectBtn.onclick = () => { rejectForm.style.display = rejectForm.style.display === 'block' ? 'none' : 'block'; };
 
   actions.appendChild(approveBtn);
+  actions.appendChild(amendBtn);
   actions.appendChild(rejectBtn);
 
   if (d.evaluation_score != null) {
@@ -519,7 +542,130 @@ function buildDraftCard(d) {
   rejectForm.appendChild(rejectSubmit);
   card.appendChild(rejectForm);
 
+  // Amend form (lazy-loaded — content fetched only when opened the first time)
+  const amendForm = document.createElement('div');
+  amendForm.className = 'amend-form';
+  amendForm.id = `amend-form-${d.id}`;
+  card.appendChild(amendForm);
+
   return card;
+}
+
+async function toggleAmend(brand, id, card, btn) {
+  const form = document.getElementById(`amend-form-${id}`);
+  if (form.classList.contains('open')) {
+    form.classList.remove('open');
+    return;
+  }
+  // First open — fetch the full post and build the editor
+  if (!form.dataset.loaded) {
+    while (form.firstChild) form.removeChild(form.firstChild);
+    const loading = document.createElement('div');
+    loading.className = 'amend-loading';
+    loading.textContent = 'Loading full draft…';
+    form.appendChild(loading);
+    form.classList.add('open');
+    btn.disabled = true;
+    try {
+      const { post } = await api('GET', `/api/content/blog/${encodeURIComponent(brand)}/${encodeURIComponent(id)}`);
+      while (form.firstChild) form.removeChild(form.firstChild);
+      form.appendChild(buildAmendEditor(brand, id, post));
+      form.dataset.loaded = '1';
+    } catch (err) {
+      while (form.firstChild) form.removeChild(form.firstChild);
+      const errEl = document.createElement('div');
+      errEl.className = 'amend-loading';
+      errEl.style.color = 'var(--red)';
+      errEl.textContent = 'Failed to load: ' + err.message;
+      form.appendChild(errEl);
+    } finally {
+      btn.disabled = false;
+    }
+  } else {
+    form.classList.add('open');
+  }
+}
+
+function buildAmendEditor(brand, id, post) {
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.gap = '0.6rem';
+
+  const fields = [
+    { key: 'title',      label: 'Title',     type: 'input',    value: post.title || '' },
+    { key: 'summary',    label: 'Summary',   type: 'textarea', value: post.summary || '', rows: 2 },
+    { key: 'content_md', label: 'Body (markdown)', type: 'textarea', value: post.content_md || '', cls: 'body' },
+  ];
+  const inputs = {};
+  fields.forEach(f => {
+    const fieldWrap = document.createElement('div');
+    fieldWrap.className = 'amend-field';
+    const lbl = document.createElement('label');
+    lbl.textContent = f.label;
+    fieldWrap.appendChild(lbl);
+    let el;
+    if (f.type === 'input') {
+      el = document.createElement('input');
+      el.type = 'text';
+    } else {
+      el = document.createElement('textarea');
+      if (f.rows) el.rows = f.rows;
+      if (f.cls) el.className = f.cls;
+    }
+    el.value = f.value;
+    inputs[f.key] = el;
+    fieldWrap.appendChild(el);
+    wrap.appendChild(fieldWrap);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'amend-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn btn-navy btn-sm';
+  saveBtn.textContent = 'Save changes';
+  saveBtn.onclick = () => saveAmend(brand, id, inputs, saveBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn btn-outline btn-sm';
+  cancelBtn.textContent = 'Close';
+  cancelBtn.onclick = () => {
+    document.getElementById(`amend-form-${id}`).classList.remove('open');
+  };
+
+  actions.appendChild(saveBtn);
+  actions.appendChild(cancelBtn);
+  wrap.appendChild(actions);
+
+  return wrap;
+}
+
+async function saveAmend(brand, id, inputs, btn) {
+  const body = {
+    title: inputs.title.value,
+    summary: inputs.summary.value,
+    content_md: inputs.content_md.value,
+  };
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const { post } = await api('PATCH', `/api/content/blog/${encodeURIComponent(brand)}/${encodeURIComponent(id)}`, body);
+    // Update the visible card (title + summary) so the editor sees their edit reflected
+    const card = document.getElementById(`draft-${id}`);
+    if (card) {
+      const titleEl = card.querySelector('.draft-card-title');
+      if (titleEl) titleEl.textContent = post.title || '(untitled)';
+      const summaryEl = card.querySelector('.draft-summary');
+      if (summaryEl && post.summary) summaryEl.textContent = post.summary.slice(0, 200) + (post.summary.length > 200 ? '…' : '');
+    }
+    toast('Changes saved — approve when ready');
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save changes';
+  }
 }
 
 async function approveDraft(brand, id, btn) {
