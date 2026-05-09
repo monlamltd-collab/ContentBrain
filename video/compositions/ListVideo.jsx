@@ -1,25 +1,31 @@
 const React = require('react');
 const { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Audio, staticFile } = require('remotion');
-const { NetworkBackground } = require('../components/NetworkBackground');
 const { BrandLogo } = require('../components/BrandLogo');
 const { ScrambleText } = require('../components/ScrambleText');
+const { ThemeDecoration } = require('../components/ThemeDecoration');
+const { getTheme } = require('../../lib/themes');
 
-const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile }) => {
+const MOTION = {
+  crisp:   { itemDamping: 12, itemStiffness: 100, itemEnter: 30 },
+  soft:    { itemDamping: 18, itemStiffness: 60,  itemEnter: 18 },
+  minimal: { itemDamping: 24, itemStiffness: 36,  itemEnter: 8  },
+};
+
+const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile, theme }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const { colours } = brand;
+  const t = typeof theme === 'string' ? getTheme(theme) : (theme && theme.background ? theme : getTheme('dark-tech'));
+  const motion = MOTION[t.motion] || MOTION.crisp;
 
-  // Title with scramble decode
   const titleOpacity = interpolate(frame, [10, 25], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
 
   return React.createElement(AbsoluteFill, {
-    style: { backgroundColor: '#0d0d14', fontFamily: "'IBM Plex Sans', 'DM Sans', Arial, sans-serif" },
+    style: { backgroundColor: t.background, fontFamily: t.fontHeading },
   },
-    React.createElement('link', { href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap', rel: 'stylesheet' }),
+    React.createElement('link', { href: t.googleFontHref, rel: 'stylesheet' }),
 
-    React.createElement(NetworkBackground, { nodeCount: 20, seed: 99 }),
+    React.createElement(ThemeDecoration, { theme: t, networkSeed: 99, networkNodes: 20 }),
 
-    // Gradient overlay
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -27,11 +33,10 @@ const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFil
         left: 0,
         right: 0,
         height: '70%',
-        background: 'linear-gradient(180deg, transparent 0%, rgba(13,13,20,0.97) 30%)',
+        background: t.backgroundOverlay,
       },
     }),
 
-    // Content
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -43,15 +48,14 @@ const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFil
         flexDirection: 'column',
       },
     },
-      // Logo
       React.createElement(BrandLogo, { brandKey, startFrame: 0, size: 44 }),
 
-      // Title
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: headline.length > 40 ? 32 : 40,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
           lineHeight: 1.2,
           marginTop: 32,
           opacity: titleOpacity,
@@ -60,7 +64,6 @@ const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFil
         React.createElement(ScrambleText, { text: headline, startFrame: 10, duration: 20 })
       ),
 
-      // List items — appear one by one
       React.createElement('div', {
         style: {
           marginTop: 28,
@@ -74,10 +77,10 @@ const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFil
           const itemProgress = spring({
             frame: Math.max(0, frame - itemStart),
             fps,
-            config: { damping: 12, stiffness: 100 },
+            config: { damping: motion.itemDamping, stiffness: motion.itemStiffness },
           });
           const itemOpacity = interpolate(itemProgress, [0, 1], [0, 1]);
-          const itemX = interpolate(itemProgress, [0, 1], [30, 0]);
+          const itemX = interpolate(itemProgress, [0, 1], [motion.itemEnter, 0]);
 
           return React.createElement('div', {
             key: i,
@@ -89,21 +92,21 @@ const ListVideo = ({ headline, items, brand, brandKey = 'auctionbrain', musicFil
               transform: `translateX(${itemX}px)`,
             },
           },
-            // Red dot marker
             React.createElement('div', {
               style: {
                 width: 10,
                 height: 10,
                 minWidth: 10,
-                backgroundColor: colours.red,
+                backgroundColor: t.accent,
                 borderRadius: '50%',
                 marginTop: 8,
               },
             }),
             React.createElement('div', {
               style: {
+                fontFamily: t.fontBody,
                 fontSize: 24,
-                color: 'rgba(255,255,255,0.85)',
+                color: t.inkMuted,
                 lineHeight: 1.4,
               },
             }, item)

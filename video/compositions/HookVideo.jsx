@@ -1,35 +1,39 @@
 const React = require('react');
 const { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Audio, staticFile } = require('remotion');
-const { NetworkBackground } = require('../components/NetworkBackground');
 const { BrandLogo } = require('../components/BrandLogo');
 const { ScrambleText } = require('../components/ScrambleText');
+const { ThemeDecoration } = require('../components/ThemeDecoration');
+const { getTheme } = require('../../lib/themes');
 
-const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile }) => {
+const MOTION = {
+  crisp:   { headlineDamping: 14, headlineStiffness: 60, ctaDamping: 12, ctaStiffness: 80, headlineEnter: -300, ctaEnter: 60 },
+  soft:    { headlineDamping: 20, headlineStiffness: 40, ctaDamping: 18, ctaStiffness: 50, headlineEnter: -180, ctaEnter: 36 },
+  minimal: { headlineDamping: 26, headlineStiffness: 22, ctaDamping: 24, ctaStiffness: 30, headlineEnter: -90, ctaEnter: 18 },
+};
+
+const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile, theme }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const { colours } = brand;
+  const t = typeof theme === 'string' ? getTheme(theme) : (theme && theme.background ? theme : getTheme('dark-tech'));
+  const motion = MOTION[t.motion] || MOTION.crisp;
 
-  // Headline: slide in from left
-  const headlineProgress = spring({ frame: Math.max(0, frame - 20), fps, config: { damping: 14, stiffness: 60 } });
-  const headlineX = interpolate(headlineProgress, [0, 1], [-300, 0]);
+  const headlineProgress = spring({ frame: Math.max(0, frame - 20), fps, config: { damping: motion.headlineDamping, stiffness: motion.headlineStiffness } });
+  const headlineX = interpolate(headlineProgress, [0, 1], [motion.headlineEnter, 0]);
   const headlineOpacity = interpolate(headlineProgress, [0, 1], [0, 1]);
 
-  // Body: scramble text from frame 50
-  // CTA bar: slide up from frame 80
-  const ctaProgress = spring({ frame: Math.max(0, frame - 80), fps, config: { damping: 12, stiffness: 80 } });
-  const ctaY = interpolate(ctaProgress, [0, 1], [60, 0]);
+  const ctaProgress = spring({ frame: Math.max(0, frame - 80), fps, config: { damping: motion.ctaDamping, stiffness: motion.ctaStiffness } });
+  const ctaY = interpolate(ctaProgress, [0, 1], [motion.ctaEnter, 0]);
   const ctaOpacity = interpolate(ctaProgress, [0, 1], [0, 1]);
 
   const headlineSize = headline.length > 60 ? 36 : headline.length > 40 ? 44 : 52;
 
   return React.createElement(AbsoluteFill, {
-    style: { backgroundColor: '#0d0d14', fontFamily: "'IBM Plex Sans', 'DM Sans', Arial, sans-serif" },
+    style: { backgroundColor: t.background, fontFamily: t.fontHeading },
   },
-    React.createElement('link', { href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap', rel: 'stylesheet' }),
+    React.createElement('link', { href: t.googleFontHref, rel: 'stylesheet' }),
 
-    React.createElement(NetworkBackground, { nodeCount: 22, seed: 73 }),
+    React.createElement(ThemeDecoration, { theme: t, networkSeed: 73, networkNodes: 22 }),
 
-    // Gradient overlay
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -37,11 +41,10 @@ const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musi
         left: 0,
         right: 0,
         height: '65%',
-        background: 'linear-gradient(180deg, transparent 0%, rgba(13,13,20,0.95) 35%)',
+        background: t.backgroundOverlay,
       },
     }),
 
-    // Content
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -53,15 +56,14 @@ const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musi
         flexDirection: 'column',
       },
     },
-      // Logo
       React.createElement(BrandLogo, { brandKey, startFrame: 0, size: 44 }),
 
-      // Hook headline
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: headlineSize,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
           lineHeight: 1.2,
           marginTop: 32,
           transform: `translateX(${headlineX}px)`,
@@ -69,11 +71,11 @@ const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musi
         },
       }, headline),
 
-      // Body text with scramble
       React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 22,
-          color: 'rgba(255,255,255,0.7)',
+          color: t.inkMuted,
           lineHeight: 1.6,
           marginTop: 20,
           fontStyle: 'italic',
@@ -82,10 +84,9 @@ const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musi
         React.createElement(ScrambleText, { text: body, startFrame: 50, duration: 30 })
       ),
 
-      // CTA bar
       React.createElement('div', {
         style: {
-          backgroundColor: colours.green,
+          backgroundColor: t.accentSecondary,
           padding: '20px 32px',
           marginTop: 28,
           marginBottom: 60,
@@ -97,6 +98,7 @@ const HookVideo = ({ headline, body, cta, brand, brandKey = 'auctionbrain', musi
       },
         React.createElement('span', {
           style: {
+            fontFamily: t.fontBody,
             fontSize: 22,
             fontWeight: 500,
             color: '#ffffff',

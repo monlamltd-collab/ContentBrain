@@ -219,6 +219,37 @@ async function handleLeverCommand(text /* , msg */) {
     return true;
   }
 
+  // /visual <brand> [show | clear | themes | <text…>]
+  // Free-form visual steer per brand. Claude reads it at generation time and
+  // picks one of the available themes. `themes` lists what's available.
+  if (head === '/visual') {
+    const [, brandArg, rest] = cmdTokens(text, 2);
+    const { THEMES, THEME_NAMES, DEFAULT_THEME_NAME } = require('./lib/themes');
+    if (!brandArg) {
+      await sendNotification(`Usage: <code>/visual &lt;brand&gt; [show | clear | themes | &lt;text…&gt;]</code>`);
+      return true;
+    }
+    if (brandArg.toLowerCase() === 'themes') {
+      const lines = THEME_NAMES.map(n => `• <b>${n}</b>${n === DEFAULT_THEME_NAME ? ' (default)' : ''}\n  ${escapeHtml(THEMES[n].description)}`);
+      await sendNotification(`<b>Available themes</b>\n\n${lines.join('\n\n')}`);
+      return true;
+    }
+    const brand = requireBrand(brandArg);
+    if (!rest || rest.toLowerCase() === 'show') {
+      const d = await runtimeConfig.getBrandVisualDirective(brand);
+      await sendNotification(`<b>${defaultBrands[brand].name} visual directive</b>\n${d ? escapeHtml(d) : '(none — Claude picks freely from the theme menu)'}`);
+      return true;
+    }
+    if (rest.toLowerCase() === 'clear' || rest.toLowerCase() === 'reset' || rest.toLowerCase() === 'remove') {
+      await runtimeConfig.clearLever(brand, 'visual_directive');
+      await sendNotification(`Cleared <b>${defaultBrands[brand].name}</b> visual directive.`);
+      return true;
+    }
+    await runtimeConfig.setLever(brand, 'visual_directive', rest);
+    await sendNotification(`Updated <b>${defaultBrands[brand].name}</b> visual directive:\n${escapeHtml(rest)}\n\nClaude will use this to pick from: ${THEME_NAMES.join(', ')}.`);
+    return true;
+  }
+
   // /hooks [list | add <text> | rm <n> | reset]
   if (head === '/hooks') {
     const [, ...args] = cmdTokens(text, 2);
@@ -530,6 +561,7 @@ async function handleLeverCommand(text /* , msg */) {
           if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
           if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
           if (post.author) meta.author = post.author;
+          if (post.visual_style) meta.visual_style = post.visual_style;
 
           const saved = await insertPost({
             brand: post.brand,
@@ -966,6 +998,7 @@ async function runGenerate() {
         if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
         if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
         if (post.author) meta.author = post.author;
+        if (post.visual_style) meta.visual_style = post.visual_style;
 
         const saved = await insertPost({
           brand: post.brand,
@@ -2069,6 +2102,7 @@ Classify this request. Return JSON:
                 if (post.hook_pattern) meta.hook_pattern = post.hook_pattern;
                 if (post.cta_pattern) meta.cta_pattern = post.cta_pattern;
                 if (post.author) meta.author = post.author;
+                if (post.visual_style) meta.visual_style = post.visual_style;
 
                 const saved = await insertPost({
                   brand: post.brand,
@@ -2183,7 +2217,8 @@ Classify this request. Return JSON:
             `/tone &lt;brand&gt; [new tone…]\n` +
             `/audience &lt;brand&gt; [new audience…]\n` +
             `/messages &lt;brand&gt; [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n` +
-            `/directive &lt;brand&gt; [show | clear | &lt;text…&gt;]\n\n` +
+            `/directive &lt;brand&gt; [show | clear | &lt;text…&gt;]\n` +
+            `/visual &lt;brand&gt; [show | clear | themes | &lt;text…&gt;]\n\n` +
             `<b>Pattern menus</b>\n` +
             `/hooks [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n` +
             `/ctas  [list | add &lt;text&gt; | rm &lt;n&gt; | reset]\n\n` +
@@ -2213,7 +2248,7 @@ Classify this request. Return JSON:
         if (text.startsWith('/levers') || text.startsWith('/tone') || text.startsWith('/audience') ||
             text.startsWith('/messages') || text.startsWith('/hooks') || text.startsWith('/ctas') ||
             text.startsWith('/active') || text.startsWith('/templates') ||
-            text.startsWith('/directive') || text.startsWith('/regen') ||
+            text.startsWith('/directive') || text.startsWith('/visual') || text.startsWith('/regen') ||
             text.startsWith('/authors') || text.startsWith('/author ') || text === '/author') {
           try {
             const handled = await handleLeverCommand(text, msg);

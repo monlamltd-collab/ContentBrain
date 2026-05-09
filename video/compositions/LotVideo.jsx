@@ -1,6 +1,7 @@
 const React = require('react');
 const { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, Audio, Img, staticFile } = require('remotion');
 const { BrandLogo } = require('../components/BrandLogo');
+const { getTheme } = require('../../lib/themes');
 
 // Lot of the Day composition. Vertical (1080×1920), designed to host a
 // 60–90s voiceover. Layout:
@@ -11,10 +12,20 @@ const { BrandLogo } = require('../components/BrandLogo');
 //             - Bullets cycling on (lower)
 //   last 5s CTA card fades over the photo
 //
-// Inputs come from server.js's runLotOfTheDay() flow. The voiceover file is
-// the cleaned wav written by lib/audio-processor.js after Simon's Telegram
-// voice-message reply. If voiceoverFile is null the composition still renders
-// (silent) — used for dry-runs.
+// The photo dominates the visual frame, so the theme only styles the chrome
+// — intro/CTA card backgrounds, accent strokes, font choices. The Ken Burns
+// pan and the photo itself are theme-independent.
+
+// Convert a hex like '#0d0d14' to an rgba(...) string with the given alpha.
+// Used to make theme-aware translucent overlays over the photo.
+function hexToRgba(hex, alpha) {
+  if (!hex || typeof hex !== 'string' || !hex.startsWith('#')) return `rgba(13,13,20,${alpha})`;
+  const h = hex.replace('#', '');
+  const r = parseInt(h.length === 3 ? h[0] + h[0] : h.slice(0, 2), 16);
+  const g = parseInt(h.length === 3 ? h[1] + h[1] : h.slice(2, 4), 16);
+  const b = parseInt(h.length === 3 ? h[2] + h[2] : h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 
 const LotVideo = ({
   lot = {},
@@ -25,10 +36,11 @@ const LotVideo = ({
   brandKey = 'auctionbrain',
   voiceoverFile = null,
   musicFile = null,
+  theme,
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const { colours } = brand;
+  const t = typeof theme === 'string' ? getTheme(theme) : (theme && theme.background ? theme : getTheme('dark-tech'));
   const bullets = Array.isArray(keyBullets) ? keyBullets : [];
 
   const introEnd = 3 * fps;
@@ -36,7 +48,6 @@ const LotVideo = ({
   const bulletsStart = 9 * fps;
   const ctaStart = Math.max(durationInFrames - 5 * fps, bulletsStart);
 
-  // Ken Burns: scale + slow drift
   const photoScale = interpolate(frame, [0, durationInFrames], [1.0, 1.18], { extrapolateRight: 'clamp' });
   const photoX = interpolate(frame, [0, durationInFrames], [0, -50], { extrapolateRight: 'clamp' });
   const photoY = interpolate(frame, [0, durationInFrames], [0, -40], { extrapolateRight: 'clamp' });
@@ -44,24 +55,29 @@ const LotVideo = ({
   const introOpacity = interpolate(frame, [0, 12, introEnd - 15, introEnd], [0, 1, 1, 0], {
     extrapolateLeft: 'clamp', extrapolateRight: 'clamp'
   });
-
   const overlayOpacity = interpolate(frame, [photoStart + 10, photoStart + 30], [0, 1], {
     extrapolateLeft: 'clamp', extrapolateRight: 'clamp'
   });
-
   const ctaOpacity = interpolate(frame, [ctaStart, ctaStart + 18], [0, 1], {
     extrapolateLeft: 'clamp', extrapolateRight: 'clamp'
   });
 
-  return React.createElement(AbsoluteFill, {
-    style: { backgroundColor: '#0d0d14', fontFamily: "'IBM Plex Sans', 'DM Sans', Arial, sans-serif" }
-  },
-    React.createElement('link', {
-      href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;700&display=swap',
-      rel: 'stylesheet'
-    }),
+  // Photo gradient overlay uses the theme background colour so light themes
+  // don't paint a dark band over the photo bottom.
+  const photoGradient = `linear-gradient(180deg, ${hexToRgba(t.background, 0.55)} 0%, ${hexToRgba(t.background, 0.15)} 28%, ${hexToRgba(t.background, 0.55)} 70%, ${hexToRgba(t.background, 0.95)} 100%)`;
+  const cardBg = hexToRgba(t.background, 0.9);
+  const introBg = hexToRgba(t.background, 0.94);
 
-    // Lot photo with Ken Burns
+  // Pick a sensible text colour for the photo overlays — the white text shadow
+  // approach works for both light and dark backgrounds because the gradient
+  // beneath it always tends toward the theme background.
+  const photoInk = t.background === '#0d0d14' ? '#ffffff' : t.ink;
+
+  return React.createElement(AbsoluteFill, {
+    style: { backgroundColor: t.background, fontFamily: t.fontHeading }
+  },
+    React.createElement('link', { href: t.googleFontHref, rel: 'stylesheet' }),
+
     lot.image_url ? React.createElement('div', {
       style: { position: 'absolute', inset: 0, overflow: 'hidden' }
     },
@@ -76,11 +92,7 @@ const LotVideo = ({
         }
       }),
       React.createElement('div', {
-        style: {
-          position: 'absolute',
-          inset: 0,
-          background: 'linear-gradient(180deg, rgba(13,13,20,0.55) 0%, rgba(13,13,20,0.15) 28%, rgba(13,13,20,0.55) 70%, rgba(13,13,20,0.95) 100%)'
-        }
+        style: { position: 'absolute', inset: 0, background: photoGradient }
       })
     ) : null,
 
@@ -93,7 +105,7 @@ const LotVideo = ({
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'rgba(13,13,20,0.94)',
+        background: introBg,
         opacity: introOpacity,
         padding: '0 80px',
       }
@@ -101,9 +113,10 @@ const LotVideo = ({
       React.createElement(BrandLogo, { brandKey, startFrame: 0, size: 80 }),
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 64,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
           textAlign: 'center',
           marginTop: 40,
           lineHeight: 1.15,
@@ -113,22 +126,23 @@ const LotVideo = ({
         style: {
           width: 96,
           height: 4,
-          backgroundColor: colours.red,
+          backgroundColor: t.accent,
           marginTop: 28,
           borderRadius: 2,
         }
       }),
       React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 28,
-          color: 'rgba(255,255,255,0.7)',
+          color: t.inkMuted,
           marginTop: 28,
           textAlign: 'center',
         }
       }, "Today's lot →")
     ),
 
-    // Address + brand mark (top)
+    // Address top
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -141,24 +155,27 @@ const LotVideo = ({
       React.createElement(BrandLogo, { brandKey, startFrame: photoStart + 5, size: 48 }),
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 36,
           fontWeight: 700,
-          color: '#ffffff',
+          color: photoInk,
           marginTop: 24,
           textShadow: '0 2px 12px rgba(0,0,0,0.7)',
         }
       }, lot.address || ''),
       lot.postcode ? React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 24,
-          color: 'rgba(255,255,255,0.85)',
+          color: photoInk,
+          opacity: 0.85,
           marginTop: 4,
           textShadow: '0 2px 8px rgba(0,0,0,0.6)',
         }
       }, lot.postcode) : null
     ),
 
-    // Hook headline + price (mid-screen)
+    // Hook + price
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -170,9 +187,10 @@ const LotVideo = ({
     },
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 84,
           fontWeight: 700,
-          color: '#ffffff',
+          color: photoInk,
           lineHeight: 1.05,
           textShadow: '0 4px 20px rgba(0,0,0,0.75)',
         }
@@ -181,23 +199,23 @@ const LotVideo = ({
         style: {
           width: 120,
           height: 4,
-          backgroundColor: colours.red,
+          backgroundColor: t.accent,
           marginTop: 24,
           borderRadius: 2,
         }
       }),
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 56,
           fontWeight: 700,
-          color: colours.red,
+          color: t.accent,
           marginTop: 24,
           textShadow: '0 2px 12px rgba(0,0,0,0.6)',
         }
       }, formatPrice(lot.price))
     ),
 
-    // Bullets — animate in one by one
     bullets.length ? React.createElement('div', {
       style: {
         position: 'absolute',
@@ -208,17 +226,14 @@ const LotVideo = ({
     },
       ...bullets.map((bullet, i) => {
         const start = bulletsStart + (i * 4 * fps);
-        const op = interpolate(frame, [start, start + 15], [0, 1], {
-          extrapolateLeft: 'clamp', extrapolateRight: 'clamp'
-        });
-        const ty = interpolate(frame, [start, start + 15], [12, 0], {
-          extrapolateLeft: 'clamp', extrapolateRight: 'clamp'
-        });
+        const op = interpolate(frame, [start, start + 15], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        const ty = interpolate(frame, [start, start + 15], [12, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
         return React.createElement('div', {
           key: i,
           style: {
+            fontFamily: t.fontBody,
             fontSize: 28,
-            color: '#ffffff',
+            color: photoInk,
             marginTop: i === 0 ? 0 : 12,
             opacity: op,
             transform: `translateY(${ty}px)`,
@@ -228,7 +243,7 @@ const LotVideo = ({
       })
     ) : null,
 
-    // CTA card (final phase)
+    // CTA card
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -238,28 +253,29 @@ const LotVideo = ({
         textAlign: 'center',
         opacity: ctaOpacity,
         padding: '24px 32px',
-        background: 'rgba(13,13,20,0.85)',
-        border: `2px solid ${colours.red}`,
+        background: cardBg,
+        border: `2px solid ${t.accent}`,
         borderRadius: 12,
       }
     },
       React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 24,
-          color: 'rgba(255,255,255,0.65)',
+          color: t.inkMuted,
           marginBottom: 8,
         }
       }, 'Full breakdown at'),
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 40,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
         }
       }, 'auctionbrain.co.uk')
     ),
 
-    // Background music — quiet, ducked under voiceover
     musicFile ? React.createElement(Audio, {
       src: staticFile(musicFile),
       volume: (f) => {
@@ -270,7 +286,6 @@ const LotVideo = ({
       }
     }) : null,
 
-    // Voiceover (kicks in just before intro card fades)
     voiceoverFile ? React.createElement(Audio, {
       src: staticFile(voiceoverFile),
       volume: 1.0,

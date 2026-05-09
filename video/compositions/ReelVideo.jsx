@@ -1,27 +1,33 @@
 const React = require('react');
 const { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Audio, staticFile } = require('remotion');
-const { NetworkBackground } = require('../components/NetworkBackground');
 const { BrandLogo } = require('../components/BrandLogo');
 const { ScrambleText } = require('../components/ScrambleText');
+const { ThemeDecoration } = require('../components/ThemeDecoration');
+const { getTheme } = require('../../lib/themes');
 
-const ReelVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile }) => {
+const MOTION = {
+  crisp:   { damping: 10, stiffness: 60, fadeIn: [15, 35] },
+  soft:    { damping: 16, stiffness: 38, fadeIn: [18, 50] },
+  minimal: { damping: 22, stiffness: 22, fadeIn: [22, 70] },
+};
+
+const ReelVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile, theme }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const { colours } = brand;
+  const t = typeof theme === 'string' ? getTheme(theme) : (theme && theme.background ? theme : getTheme('dark-tech'));
+  const motion = MOTION[t.motion] || MOTION.crisp;
 
-  // Headline zoom-in settle
-  const zoomSpring = spring({ frame: Math.max(0, frame - 15), fps, config: { damping: 10, stiffness: 60 } });
+  const zoomSpring = spring({ frame: Math.max(0, frame - 15), fps, config: { damping: motion.damping, stiffness: motion.stiffness } });
   const headlineScale = interpolate(zoomSpring, [0, 1], [1.2, 1]);
-  const headlineOpacity = interpolate(frame, [15, 35], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+  const headlineOpacity = interpolate(frame, motion.fadeIn, [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
 
   return React.createElement(AbsoluteFill, {
-    style: { backgroundColor: '#0d0d14', fontFamily: "'IBM Plex Sans', 'DM Sans', Arial, sans-serif" },
+    style: { backgroundColor: t.background, fontFamily: t.fontHeading },
   },
-    React.createElement('link', { href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap', rel: 'stylesheet' }),
+    React.createElement('link', { href: t.googleFontHref, rel: 'stylesheet' }),
 
-    React.createElement(NetworkBackground, { nodeCount: 30, seed: 55 }),
+    React.createElement(ThemeDecoration, { theme: t, networkSeed: 55, networkNodes: 30 }),
 
-    // Gradient overlay — covers bottom 60%
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -29,11 +35,10 @@ const ReelVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         left: 0,
         right: 0,
         height: '60%',
-        background: 'linear-gradient(180deg, transparent 0%, rgba(13,13,20,0.95) 35%)',
+        background: t.backgroundOverlay,
       },
     }),
 
-    // Content — centred vertically, left-aligned
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -45,15 +50,14 @@ const ReelVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         flexDirection: 'column',
       },
     },
-      // Logo
       React.createElement(BrandLogo, { brandKey, startFrame: 0, size: 52 }),
 
-      // Headline — zoom settle
       React.createElement('div', {
         style: {
+          fontFamily: t.fontHeading,
           fontSize: 64,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
           lineHeight: 1.15,
           marginTop: 36,
           transform: `scale(${headlineScale})`,
@@ -62,11 +66,11 @@ const ReelVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         },
       }, headline),
 
-      // Subline — scramble decode
       React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 30,
-          color: colours.green,
+          color: t.accentSecondary,
           lineHeight: 1.4,
           marginTop: 24,
           fontStyle: 'italic',

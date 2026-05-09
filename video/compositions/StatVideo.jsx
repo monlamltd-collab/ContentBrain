@@ -1,31 +1,36 @@
 const React = require('react');
 const { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Audio, staticFile } = require('remotion');
-const { NetworkBackground } = require('../components/NetworkBackground');
 const { BrandLogo } = require('../components/BrandLogo');
 const { ScrambleText } = require('../components/ScrambleText');
+const { ThemeDecoration } = require('../components/ThemeDecoration');
+const { getTheme } = require('../../lib/themes');
 
-const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile }) => {
+// Spring presets per theme.motion. Keeps motion intent in one place so
+// every composition reads the same vocabulary.
+const MOTION = {
+  crisp:   { damping: 12, stiffness: 80, ease: [12, 30] },
+  soft:    { damping: 18, stiffness: 50, ease: [18, 45] },
+  minimal: { damping: 24, stiffness: 30, ease: [24, 60] },
+};
+
+const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile, voiceoverFile, theme }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const { colours } = brand;
+  const t = typeof theme === 'string' ? getTheme(theme) : (theme && theme.background ? theme : getTheme('dark-tech'));
+  const motion = MOTION[t.motion] || MOTION.crisp;
 
-  // Big stat number: scale in with spring
-  const statScale = spring({ frame: Math.max(0, frame - 15), fps, config: { damping: 12, stiffness: 80 } });
-  const statOpacity = interpolate(frame, [15, 30], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
-
-  // Red divider sweep
+  const statScale = spring({ frame: Math.max(0, frame - 15), fps, config: { damping: motion.damping, stiffness: motion.stiffness } });
+  const statOpacity = interpolate(frame, motion.ease, [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   const dividerWidth = interpolate(frame, [40, 60], [0, 120], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
 
   return React.createElement(AbsoluteFill, {
-    style: { backgroundColor: '#0d0d14', fontFamily: "'IBM Plex Sans', 'DM Sans', Arial, sans-serif" },
+    style: { backgroundColor: t.background, fontFamily: t.fontHeading },
   },
-    // Google Fonts
-    React.createElement('link', { href: 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap', rel: 'stylesheet' }),
+    React.createElement('link', { href: t.googleFontHref, rel: 'stylesheet' }),
 
-    // Neural network background
-    React.createElement(NetworkBackground, { nodeCount: 25, seed: 42 }),
+    React.createElement(ThemeDecoration, { theme: t, networkSeed: 42, networkNodes: 25 }),
 
-    // Dark overlay card (like Canva style)
+    // Bottom gradient — fades content area into the background colour
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -33,11 +38,10 @@ const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         left: 0,
         right: 0,
         height: '55%',
-        background: 'linear-gradient(180deg, transparent 0%, rgba(13,13,20,0.95) 30%)',
+        background: t.backgroundOverlay,
       },
     }),
 
-    // Content
     React.createElement('div', {
       style: {
         position: 'absolute',
@@ -49,16 +53,14 @@ const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         flexDirection: 'column',
       },
     },
-      // Logo
       React.createElement(BrandLogo, { brandKey, startFrame: 0, size: 48 }),
 
-      // Stat number
       React.createElement('div', {
         style: {
-          fontFamily: "'IBM Plex Sans', Arial, sans-serif",
+          fontFamily: t.fontHeading,
           fontSize: headline.length > 20 ? 64 : headline.length > 10 ? 80 : 96,
           fontWeight: 700,
-          color: '#ffffff',
+          color: t.ink,
           marginTop: 40,
           transform: `scale(${statScale})`,
           opacity: statOpacity,
@@ -66,23 +68,22 @@ const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
         },
       }, headline),
 
-      // Red divider
       React.createElement('div', {
         style: {
           width: dividerWidth,
           height: 3,
-          backgroundColor: colours.red,
+          backgroundColor: t.accent,
           marginTop: 16,
           marginBottom: 16,
           borderRadius: 2,
         },
       }),
 
-      // Caption with scramble effect
       React.createElement('div', {
         style: {
+          fontFamily: t.fontBody,
           fontSize: 24,
-          color: 'rgba(255,255,255,0.7)',
+          color: t.inkMuted,
           lineHeight: 1.5,
           fontStyle: 'italic',
         },
@@ -91,7 +92,6 @@ const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
       )
     ),
 
-    // Background music with fade in/out
     musicFile ? React.createElement(Audio, {
       src: staticFile(musicFile),
       volume: (f) => {
@@ -102,7 +102,6 @@ const StatVideo = ({ headline, body, brand, brandKey = 'auctionbrain', musicFile
       },
     }) : null,
 
-    // Voiceover
     voiceoverFile ? React.createElement(Audio, { src: staticFile(voiceoverFile), volume: 0.9, startFrom: 15 }) : null
   );
 };
