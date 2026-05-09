@@ -367,6 +367,7 @@
   }
 
   function renderPatterns(elId, list, lever) {
+    const type = lever === 'hook_patterns' ? 'hook' : 'cta';
     const items = list.map((p, i) => `
       <div class="item">
         <div class="label-tag">${escHtml(p.label)}</div>
@@ -374,19 +375,47 @@
         <button class="danger" data-rm="${i}">Remove</button>
       </div>`).join('');
     const empty = list.length ? '' : '<div class="empty">(no patterns)</div>';
+    const placeholder = type === 'hook'
+      ? 'Paste a full pattern, or describe one and click Draft with AI…'
+      : 'Paste a full CTA pattern, or describe one and click Draft with AI…';
     const html = `
       <div class="item-list">${empty}${items}</div>
-      <div class="add-form">
-        <input type="text" data-pattern-new placeholder="New pattern body…">
+      <div class="add-form" style="flex-wrap:wrap;">
+        <input type="text" data-pattern-new placeholder="${escHtml(placeholder)}">
+        <button data-pattern-draft title="Send the text above to Claude for a polished version in the existing format">✨ Draft with AI</button>
         <button class="primary" data-pattern-add>Add</button>
       </div>
     `;
     const root = document.getElementById(elId);
     setHTML(root, html);
     root.querySelector('[data-pattern-add]').addEventListener('click', () => addPattern(lever, root));
+    root.querySelector('[data-pattern-draft]').addEventListener('click', () => draftPattern(type, root));
     root.querySelectorAll('[data-rm]').forEach(btn =>
       btn.addEventListener('click', () => removePattern(lever, parseInt(btn.dataset.rm, 10)))
     );
+  }
+
+  // Send the operator's rough idea to Claude, replace the input with the
+  // polished pattern body. The operator reviews + can edit before clicking Add.
+  async function draftPattern(type, root) {
+    const input = root.querySelector('[data-pattern-new]');
+    const draftBtn = root.querySelector('[data-pattern-draft]');
+    const idea = input.value.trim();
+    if (!idea) { toast('Type a rough description first, then click Draft.', 'error'); return; }
+    draftBtn.disabled = true;
+    const original = draftBtn.textContent;
+    draftBtn.textContent = 'Drafting…';
+    try {
+      const { suggestion } = await api('POST', '/api/levers/pattern/draft', { type, idea });
+      input.value = suggestion;
+      input.focus();
+      toast('Draft ready — review and click Add when happy.');
+    } catch (err) {
+      toast('Draft failed: ' + err.message, 'error');
+    } finally {
+      draftBtn.disabled = false;
+      draftBtn.textContent = original;
+    }
   }
   async function addPattern(lever, root) {
     const value = root.querySelector('[data-pattern-new]').value.trim();

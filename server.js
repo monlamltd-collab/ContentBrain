@@ -3087,6 +3087,66 @@ app.post('/api/levers', requireAuth, async (req, res) => {
   }
 });
 
+// AI-assisted pattern drafter. Operator types a rough idea ("something about
+// underestimating a property's potential") and Claude returns a polished
+// pattern body in the existing menu format. Used by the "Draft with AI"
+// button in /levers next to the Add input.
+app.post('/api/levers/pattern/draft', requireAuth, async (req, res) => {
+  try {
+    const { type, idea } = req.body || {};
+    if (type !== 'hook' && type !== 'cta') return res.status(400).json({ error: 'type must be "hook" or "cta"' });
+    if (!idea || typeof idea !== 'string' || !idea.trim()) return res.status(400).json({ error: 'idea required' });
+
+    const runtimeConfig = require('./lib/runtime-config');
+    const existing = type === 'hook' ? await runtimeConfig.getHookPatterns() : await runtimeConfig.getCtaPatterns();
+    const brand = await runtimeConfig.getResolvedBrand('auctionbrain');
+
+    const examples = existing.slice(0, 8).map(p => `- ${p.body}`).join('\n');
+
+    const formatGuide = type === 'hook'
+      ? `Each pattern is a single line: "NAME — short description with a concrete example in parentheses or quotes". The NAME is 2–4 words in CAPS. The description names the rhetorical move. The example is a specific, plausible UK property auction sentence.`
+      : `Each pattern is a single line: "NAME — short description, then a quoted CTA example pointing at auctionbrain.co.uk or bridgematch.co.uk". The NAME is 2–4 words in CAPS. The example must promise something specific (not a bare URL).`;
+
+    const system = `You design ${type === 'hook' ? 'hook' : 'CTA'} patterns for a UK property auction social-content pipeline (AuctionBrain).
+AUDIENCE: ${brand.audience}
+TONE: ${brand.tone}
+
+${formatGuide}
+Return ONE pattern body only — no preamble, no markdown, no surrounding quotes, no numbered label, just the pattern line itself.`;
+
+    const user = `Existing patterns (do not duplicate the rhetorical move of any of these):
+${examples}
+
+The operator wants a new pattern based on this rough idea:
+"${idea.trim()}"
+
+Write ONE new pattern in the existing format. Output the pattern body only.`;
+
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 250,
+      system,
+      messages: [{ role: 'user', content: user }],
+    });
+
+    const text = (response.content || []).find(b => b.type === 'text')?.text || '';
+    // Strip surrounding quotes/whitespace and any numeric/letter prefix Claude might prepend.
+    const suggestion = text
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/^[0-9]+[.)]\s+/, '')
+      .replace(/^[A-Z][.)]\s+/, '')
+      .trim();
+    if (!suggestion) return res.status(502).json({ error: 'Claude returned an empty draft' });
+    res.json({ suggestion });
+  } catch (err) {
+    console.error('[POST /api/levers/pattern/draft] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Manual content-generation trigger. Bypasses the once-per-day dedupe in
 // runGenerate so the operator can re-run on demand from the UI.
 app.post('/api/triggers/generate', requireAuth, async (req, res) => {
