@@ -2989,9 +2989,12 @@ app.post('/api/social/posts/:id/rerender', requireAuth, async (req, res) => {
 // is just HTML + vanilla JS — no framework, no build step. All state lives
 // in app_config; this layer is purely a UI on top of runtime-config.
 
-app.get('/levers', requireAuth, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'levers.html'));
+// /controls is the canonical URL; /levers is kept as a redirect so anything
+// that bookmarked the old path still lands in the right place.
+app.get('/controls', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'controls.html'));
 });
+app.get('/levers', requireAuth, (req, res) => res.redirect(301, '/controls'));
 
 // Full snapshot of every lever value, plus the menus the UI needs to render
 // (theme list, archetype list, template list, brand list).
