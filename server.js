@@ -2631,10 +2631,27 @@ async function resendDraftReviewCards() {
   try {
     const drafts = await getDraftBlogPosts().catch(() => []);
     if (!drafts.length) return;
+
+    // Only resend drafts older than 6 hours. The original purpose was to
+    // self-heal lost button presses from a Telegram polling outage — but a
+    // freshly-created draft is almost certainly already sitting unread in
+    // Simon's chat from minutes ago, and re-pinging it (every redeploy)
+    // is just spam. 6h is a generous floor that catches genuinely-stuck
+    // ones without re-pinging anything fresh.
+    const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
+    const stale = drafts.filter(d => {
+      const t = d.created_at ? new Date(d.created_at).getTime() : 0;
+      return t > 0 && t < sixHoursAgo;
+    });
+    if (!stale.length) {
+      if (drafts.length) console.log(`[startup] ${drafts.length} draft(s) exist but all <6h old — skipping resend`);
+      return;
+    }
+
     const { sendBlogForReview } = require('./lib/telegram');
     const { getSourceArticlesForPost } = require('./lib/supabase');
     let sent = 0;
-    for (const d of drafts) {
+    for (const d of stale) {
       try {
         const sources = await getSourceArticlesForPost(d.id, d.brand || 'auctionbrain').catch(() => []);
         await sendBlogForReview({
@@ -2652,7 +2669,7 @@ async function resendDraftReviewCards() {
         console.warn(`[startup] resend failed for ${d.id}: ${err.message}`);
       }
     }
-    if (sent) console.log(`[startup] resent ${sent} review card(s) for drafts`);
+    if (sent) console.log(`[startup] resent ${sent} stale (>6h) review card(s)`);
   } catch (err) {
     console.warn(`[startup] resendDraftReviewCards: ${err.message}`);
   }
@@ -3083,6 +3100,33 @@ app.post('/api/levers', requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[POST /api/levers] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Recent published blogs across both brands, with public URLs. Used by the
+// "Live Blogs" panel in /levers so the operator can see what's already on
+// the landing pages and avoid approving a duplicate that's just been
+// re-suggested by the content engine.
+app.get('/api/levers/live-blogs', requireAuth, async (req, res) => {
+  try {
+    const { getPublishedBlogPostsBothBrands } = require('./lib/supabase');
+    const posts = await getPublishedBlogPostsBothBrands();
+    const BRAND_BLOG_URL = {
+      auctionbrain: 'https://www.auctionbrain.co.uk/blog',
+      bridgematch: 'https://bridgematch.co.uk/blog',
+    };
+    const slim = posts.slice(0, 60).map(p => ({
+      id: p.id,
+      title: p.title,
+      slug: p.slug,
+      brand: p.brand,
+      published_at: p.published_at,
+      url: `${BRAND_BLOG_URL[p.brand] || BRAND_BLOG_URL.auctionbrain}/${p.slug}`,
+    }));
+    res.json({ posts: slim });
+  } catch (err) {
+    console.error('[GET /api/levers/live-blogs] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

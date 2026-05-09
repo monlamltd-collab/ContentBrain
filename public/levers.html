@@ -135,6 +135,24 @@
   .triggers button { padding: 0.55rem 1.1rem; font-weight: 600; }
 
   .empty { color: var(--muted); font-size: 0.82rem; font-style: italic; }
+
+  .live-blogs { display: flex; flex-direction: column; gap: 0.4rem; max-height: 520px; overflow-y: auto; }
+  .live-blog-row {
+    display: flex; align-items: center; gap: 0.7rem; padding: 0.5rem 0.75rem;
+    background: var(--cream); border: 1px solid var(--border); border-radius: 5px;
+    font-size: 0.82rem;
+  }
+  .live-blog-row .brand-chip {
+    font-family: var(--mono); font-size: 0.65rem; font-weight: 700;
+    padding: 0.15rem 0.5rem; border-radius: 3px; flex-shrink: 0;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .live-blog-row .brand-chip.ab { background: var(--green-light); color: #0d5c40; }
+  .live-blog-row .brand-chip.bm { background: var(--amber-light); color: #92400e; }
+  .live-blog-row a.title-link { flex: 1; color: var(--text); text-decoration: none; line-height: 1.35; word-break: break-word; }
+  .live-blog-row a.title-link:hover { text-decoration: underline; color: var(--navy); }
+  .live-blog-row .date { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); flex-shrink: 0; }
+  .live-blogs-search { width: 100%; margin-bottom: 0.7rem; }
 </style>
 </head>
 <body>
@@ -217,6 +235,14 @@
       <span class="hint">Mon → Sun. Picker tries today's archetype first, falls through if empty.</span>
     </div>
     <div class="panel-body" id="schedule-body">loading…</div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <div class="panel-header">
+      <h2>Live Blogs</h2>
+      <span class="hint">Already on the landing pages. Scan before approving a Telegram draft to avoid duplicates.</span>
+    </div>
+    <div class="panel-body" id="live-blogs-body">loading…</div>
   </div>
 </main>
 
@@ -517,6 +543,42 @@
     }
   }
 
+  // ── render: live blogs (read-only) ────────────────────────────────────
+  let liveBlogs = [];
+  async function loadLiveBlogs() {
+    try {
+      const { posts } = await api('GET', '/api/levers/live-blogs');
+      liveBlogs = posts || [];
+      renderLiveBlogs('');
+    } catch (err) {
+      setHTML(document.getElementById('live-blogs-body'), `<div class="empty">Failed to load: ${escHtml(err.message)}</div>`);
+    }
+  }
+  function renderLiveBlogs(filter) {
+    const root = document.getElementById('live-blogs-body');
+    const f = (filter || '').toLowerCase().trim();
+    const filtered = f ? liveBlogs.filter(p => (p.title || '').toLowerCase().includes(f) || (p.slug || '').toLowerCase().includes(f)) : liveBlogs;
+    const rows = filtered.map(p => {
+      const brandKey = p.brand === 'bridgematch' ? 'bm' : 'ab';
+      const brandName = p.brand === 'bridgematch' ? 'BM' : 'AB';
+      const date = p.published_at ? new Date(p.published_at).toISOString().slice(0, 10) : '';
+      return `
+        <div class="live-blog-row">
+          <span class="brand-chip ${brandKey}">${brandName}</span>
+          <a class="title-link" href="${escHtml(p.url)}" target="_blank" rel="noopener">${escHtml(p.title || '(untitled)')}</a>
+          <span class="date">${escHtml(date)}</span>
+        </div>`;
+    }).join('');
+    const empty = filtered.length ? '' : `<div class="empty">${f ? 'No matches.' : 'No published blogs yet.'}</div>`;
+    setHTML(root, `
+      <input type="text" class="live-blogs-search" placeholder="Filter by title or slug…" id="live-blogs-filter" value="${escHtml(filter || '')}">
+      <div class="live-blogs">${empty}${rows}</div>
+    `);
+    const inp = document.getElementById('live-blogs-filter');
+    inp.addEventListener('input', () => renderLiveBlogs(inp.value));
+    if (filter) inp.focus();
+  }
+
   async function reload() {
     state = await api('GET', '/api/levers');
     if (!activeBrand || !state.brands.includes(activeBrand)) activeBrand = state.brands[0];
@@ -529,6 +591,7 @@
     renderMix();
     renderSchedule();
     populateLotArchetypeSelect();
+    loadLiveBlogs();
   }
 
   document.getElementById('trigger-generate').addEventListener('click', () => trigger('generate'));
