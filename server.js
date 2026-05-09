@@ -953,9 +953,9 @@ cron.schedule('*/30 * * * *', async () => {
   }
 });
 
-async function runGenerate() {
+async function runGenerate({ force = false } = {}) {
   const today = new Date().toISOString().slice(0, 10);
-  if (lastGenerateDate === today) {
+  if (!force && lastGenerateDate === today) {
     console.log(`[${new Date().toISOString()}] Cron: already generated today, skipping.`);
     return;
   }
@@ -2980,6 +2980,136 @@ app.post('/api/social/posts/:id/rerender', requireAuth, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── UNIFIED CONTROL PANEL (/levers) ──
+//
+// Surfaces every lever currently controllable via Telegram in a single web
+// page so the operator doesn't have to remember command syntax. The page
+// is just HTML + vanilla JS — no framework, no build step. All state lives
+// in app_config; this layer is purely a UI on top of runtime-config.
+
+app.get('/levers', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'levers.html'));
+});
+
+// Full snapshot of every lever value, plus the menus the UI needs to render
+// (theme list, archetype list, template list, brand list).
+app.get('/api/levers', requireAuth, async (req, res) => {
+  try {
+    const runtimeConfig = require('./lib/runtime-config');
+    const { THEMES, THEME_NAMES, DEFAULT_THEME_NAME } = require('./lib/themes');
+    const { ARCHETYPES, DEFAULT_SCHEDULE } = require('./lib/lot-picker');
+    const { brands: defaultBrands, templateTypes } = require('./lib/config');
+
+    const brandList = Object.keys(defaultBrands);
+
+    const perBrand = {};
+    for (const brand of brandList) {
+      const [tone, messages, audience, directive, visualDirective] = await Promise.all([
+        runtimeConfig.getBrandTone(brand),
+        runtimeConfig.getBrandMessages(brand),
+        runtimeConfig.getBrandAudience(brand),
+        runtimeConfig.getBrandDirective(brand),
+        runtimeConfig.getBrandVisualDirective(brand),
+      ]);
+      perBrand[brand] = {
+        name: defaultBrands[brand].name,
+        url: defaultBrands[brand].url,
+        tone, audience, directive,
+        visual_directive: visualDirective,
+        messages: Array.isArray(messages) ? messages : [],
+      };
+    }
+
+    const [activeBrands, templateWeights, hookPatterns, ctaPatterns] = await Promise.all([
+      runtimeConfig.getActiveBrands(),
+      runtimeConfig.getTemplateWeights(),
+      runtimeConfig.getHookPatterns(),
+      runtimeConfig.getCtaPatterns(),
+    ]);
+
+    // Schedule lever isn't exposed via runtime-config helpers — read directly.
+    const { supabase } = require('./lib/supabase');
+    let lotSchedule = DEFAULT_SCHEDULE;
+    try {
+      const { data } = await supabase
+        .from('app_config')
+        .select('value')
+        .eq('brand', 'global')
+        .eq('key', 'lot_archetype_schedule')
+        .maybeSingle();
+      if (Array.isArray(data?.value) && data.value.length === 7) lotSchedule = data.value;
+    } catch {}
+
+    res.json({
+      brands: brandList,
+      perBrand,
+      global: {
+        active_brands: activeBrands,
+        template_weights: templateWeights,
+        hook_patterns: hookPatterns,
+        cta_patterns: ctaPatterns,
+        lot_archetype_schedule: lotSchedule,
+      },
+      menus: {
+        themes: THEME_NAMES.map(n => ({ name: n, label: THEMES[n].label, description: THEMES[n].description, isDefault: n === DEFAULT_THEME_NAME })),
+        archetypes: ARCHETYPES,
+        templateTypes,
+      },
+    });
+  } catch (err) {
+    console.error('[GET /api/levers] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Set one lever. Body: { brand: 'auctionbrain'|'bridgematch'|'global', key: '<lever key>', value: <any JSON> }
+// Empty string or null clears (forwards to clearLever) so the UI can wire one save handler.
+app.post('/api/levers', requireAuth, async (req, res) => {
+  try {
+    const { brand, key, value } = req.body || {};
+    if (!brand || !key) return res.status(400).json({ error: 'brand and key required' });
+    const runtimeConfig = require('./lib/runtime-config');
+    const isEmpty = value == null || (typeof value === 'string' && value.trim() === '');
+    if (isEmpty) {
+      await runtimeConfig.clearLever(brand, key);
+    } else {
+      await runtimeConfig.setLever(brand, key, value);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[POST /api/levers] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual content-generation trigger. Bypasses the once-per-day dedupe in
+// runGenerate so the operator can re-run on demand from the UI.
+app.post('/api/triggers/generate', requireAuth, async (req, res) => {
+  // Don't await — generation can take 30–90s. Fire-and-forget, return immediately.
+  setImmediate(() => {
+    runGenerate({ force: true }).catch(err => {
+      console.error('[POST /api/triggers/generate] runGenerate error:', err.message);
+      sendNotification(`Manual /generate failed: ${err.message.slice(0, 200)}`).catch(() => {});
+    });
+  });
+  res.json({ ok: true, message: 'Generation started — drafts will appear in /social shortly.' });
+});
+
+// Manual Lot of the Day trigger. Same fire-and-forget pattern.
+app.post('/api/triggers/lot', requireAuth, async (req, res) => {
+  const { archetype } = req.body || {};
+  setImmediate(async () => {
+    try {
+      const { runLotOfTheDay } = require('./lib/lot-flow');
+      await runLotOfTheDay(archetype ? { forceArchetype: archetype } : {});
+    } catch (err) {
+      console.error('[POST /api/triggers/lot] runLotOfTheDay error:', err.message);
+      try { await sendNotification(`Manual Lot of the Day failed: ${err.message.slice(0, 200)}`); } catch {}
+    }
+  });
+  res.json({ ok: true, message: 'Lot of the Day started — script alert will arrive in Telegram shortly.' });
 });
 
 // ── START ──
