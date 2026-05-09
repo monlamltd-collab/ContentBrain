@@ -1070,7 +1070,7 @@ cron.schedule('*/5 * * * *', async () => {
         .update({ status: 'published', published_at: nowIso })
         .eq('status', 'approved')
         .is('scheduled_for', null)
-        .select('id, title, brand');
+        .select('id, title, brand, slug, summary, image_url, fb_post_id');
       if (r1.error) {
         console.error(`[scheduled-publish:${name}] no-schedule update error: ${r1.error.message}`);
       } else if (r1.data?.length) {
@@ -1083,7 +1083,7 @@ cron.schedule('*/5 * * * *', async () => {
         .update({ status: 'published', published_at: nowIso })
         .eq('status', 'approved')
         .lte('scheduled_for', nowIso)
-        .select('id, title, brand');
+        .select('id, title, brand, slug, summary, image_url, fb_post_id');
       if (r2.error) {
         console.error(`[scheduled-publish:${name}] scheduled update error: ${r2.error.message}`);
       } else if (r2.data?.length) {
@@ -1092,11 +1092,28 @@ cron.schedule('*/5 * * * *', async () => {
 
       if (allPublished.length) {
         console.log(`[scheduled-publish:${name}] published ${allPublished.length} blog/guide post(s):`);
+        const { publishBlogToFacebook } = require('./lib/publish');
         for (const p of allPublished) {
           console.log(`  - ${p.brand || '?'}: ${p.title}`);
           try {
             await sendNotification(`<b>Published</b> (${p.brand || 'unknown'}): ${p.title}`);
           } catch {}
+
+          // Cross-post to the brand's Facebook Page. Best-effort: a Facebook outage
+          // must not roll back the blog publish. Skip if already cross-posted (re-runs).
+          if (p.fb_post_id || !p.slug || !p.brand) continue;
+          try {
+            const result = await publishBlogToFacebook(p);
+            if (result?.postId) {
+              await client.from('blog_posts').update({ fb_post_id: result.postId }).eq('id', p.id);
+              console.log(`  [scheduled-publish:${name}] FB cross-post ok: ${p.brand}/${p.id} → ${result.postId}`);
+            }
+          } catch (err) {
+            console.error(`[scheduled-publish:${name}] FB cross-post failed for ${p.id}: ${err.message}`);
+            try {
+              await sendNotification(`<b>FB cross-post failed</b> (${p.brand}): ${p.title} — ${err.message.slice(0, 80)}`);
+            } catch {}
+          }
         }
       }
     } catch (err) {
@@ -1115,6 +1132,22 @@ cron.schedule('0 20 * * *', async () => {
     }
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Insights cron error: ${err.message}`);
+  }
+});
+
+// Daily Lot of the Day at 07:00 UTC — picks today's archetype, generates
+// caption + voiceover script, inserts a draft, and pings Simon to record.
+// The voice-memo reply (handled in pollTelegram below) drives the rest of
+// the flow: audio cleanup, render, review, publish.
+cron.schedule('0 7 * * *', async () => {
+  try {
+    const { runLotOfTheDay } = require('./lib/lot-flow');
+    await runLotOfTheDay();
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Lot of the Day cron error: ${err.message}`);
+    try {
+      await sendNotification(`<b>Lot of the Day cron failed:</b> ${err.message.slice(0, 200)}`);
+    } catch {}
   }
 });
 
@@ -1640,6 +1673,27 @@ async function pollTelegram() {
         } catch (err) {
           console.error(`[Telegram] Error processing photo: ${err.message}`);
           await sendNotification(`Error processing that image: ${err.message}`);
+        }
+        continue;
+      }
+
+      // Handle voice memo replies — route to the pending Lot of the Day if one is awaiting voice.
+      // msg.voice is Telegram's "press-to-talk" recording; msg.audio is an attached audio file.
+      // We accept either since the user's recording habit may vary.
+      if (msg && (msg.voice || msg.audio) && String(msg.chat.id) === String(CHAT_ID)) {
+        try {
+          const audio = msg.voice || msg.audio;
+          const { findPendingLotPost, processVoiceForLot } = require('./lib/lot-flow');
+          const pending = await findPendingLotPost();
+          if (!pending) {
+            await sendNotification('Got a voice memo but no Lot of the Day is currently awaiting a recording. Trigger one first.');
+            continue;
+          }
+          await sendNotification(`Got your voice — processing audio + rendering video for post ${pending.id}…`);
+          await processVoiceForLot(pending, audio.file_id);
+        } catch (err) {
+          console.error(`[Telegram] Error processing lot voice memo: ${err.message}`);
+          await sendNotification(`Error processing voice memo: ${err.message.slice(0, 200)}`);
         }
         continue;
       }

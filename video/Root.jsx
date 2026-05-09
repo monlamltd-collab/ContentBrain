@@ -4,6 +4,7 @@ const { StatVideo } = require('./compositions/StatVideo');
 const { HookVideo } = require('./compositions/HookVideo');
 const { ListVideo } = require('./compositions/ListVideo');
 const { ReelVideo } = require('./compositions/ReelVideo');
+const { LotVideo } = require('./compositions/LotVideo');
 
 const FPS = 30;
 
@@ -78,6 +79,36 @@ const Root = () => {
       defaultProps: {
         headline: 'Hidden Auction Deals',
         body: "The lots your competitors can't find",
+        brand: defaultBrand,
+        brandKey: 'auctionbrain',
+        musicFile: null,
+        voiceoverFile: null,
+      },
+    }),
+    React.createElement(Composition, {
+      id: 'LotVideo',
+      component: LotVideo,
+      durationInFrames: 75 * FPS,
+      fps: FPS,
+      width: 1080,
+      height: 1920,
+      defaultProps: {
+        lot: {
+          address: 'Silver Street, Nailsea',
+          postcode: 'BS48 2DS',
+          price: 100000,
+          beds: 3,
+          prop_type: 'flat',
+          image_url: 'https://www.hollismorgan.co.uk/resize/34541795/0/480.pagespeed.ce.cf6fnWxZMX.jpg',
+        },
+        archetype: 'deepest-discount',
+        hookHeadline: '81% below street value',
+        keyBullets: [
+          'Guide £100k vs £523k street comps',
+          '13.5% gross yield potential',
+          '3-bed leasehold, refurb required',
+          'Auction 20 May'
+        ],
         brand: defaultBrand,
         brandKey: 'auctionbrain',
         musicFile: null,
