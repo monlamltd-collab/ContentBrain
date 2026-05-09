@@ -675,8 +675,11 @@ function requireAuth(req, res, next) {
   const token = req.cookies?.auth || req.query.token || req.headers['x-auth-token'];
   if (PASSWORD && safeEqual(token, PASSWORD)) return next();
 
-  // Show login form for page routes
-  if (req.method === 'GET' && (req.path === '/' || req.path === '/content')) {
+  // Show login form for any HTML page route. /api/* and non-GET requests
+  // get JSON 401 so client code can handle them programmatically.
+  // Previously this was hard-coded to '/' and '/content' only, so /social,
+  // /levers, and any new page route returned raw JSON to a logged-out user.
+  if (req.method === 'GET' && !req.path.startsWith('/api/')) {
     return res.send(loginPage(null, req.path));
   }
   return res.status(401).json({ error: 'Unauthorized' });
