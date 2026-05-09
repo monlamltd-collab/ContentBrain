@@ -673,7 +673,23 @@ app.use('/api', reviewRouter);
 function requireAuth(req, res, next) {
   // Check session cookie or query param — constant-time compare against PASSWORD
   const token = req.cookies?.auth || req.query.token || req.headers['x-auth-token'];
-  if (PASSWORD && safeEqual(token, PASSWORD)) return next();
+  if (PASSWORD && safeEqual(token, PASSWORD)) {
+    // First-hit-via-?token=: set the cookie and redirect to a clean URL so
+    // the secret doesn't linger in browser history. After this, the cookie
+    // covers subsequent navigation. Used for the AuctionBrain admin → ContentBrain
+    // bridge link: admin.html opens .../levers?token=<adminSecret>, this branch
+    // fires once, redirects to .../levers, browser stores the auth cookie.
+    if (req.query.token && !req.cookies?.auth && req.method === 'GET') {
+      res.setHeader('Set-Cookie', `auth=${PASSWORD}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`);
+      const otherParams = new URLSearchParams();
+      for (const [k, v] of Object.entries(req.query)) {
+        if (k !== 'token' && typeof v === 'string') otherParams.append(k, v);
+      }
+      const qs = otherParams.toString();
+      return res.redirect(302, req.path + (qs ? '?' + qs : ''));
+    }
+    return next();
+  }
 
   // Show login form for any HTML page route. /api/* and non-GET requests
   // get JSON 401 so client code can handle them programmatically.
