@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ContentBrain — Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <!-- HTMX — loaded from CDN, no new npm dependency -->
+  <script src="https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <h1>ContentBrain</h1>
+    <nav class="tabs" role="tablist">
+      <button class="tab active"
+        role="tab"
+        hx-get="/dashboard/today"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Today</button>
+      <button class="tab"
+        role="tab"
+        hx-get="/dashboard/approve"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Approved</button>
+    </nav>
+  </header>
+
+  <main id="tab-content"
+    hx-get="/dashboard/today"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <p class="loading">Loading&hellip;</p>
+  </main>
+
+  <script>
+    function setActive(el) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+    }
+  </script>
+</body>
+</html>
