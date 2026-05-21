@@ -1203,6 +1203,54 @@ cron.schedule('0 7 * * *', async () => {
   }
 });
 
+// ── WEEKLY SUPERLATIVE REELS ──
+// Monday 08:00 — generate the five "X of the week" auction reels (cheapest,
+// most expensive, best deal, biggest discount, worst lot), render them
+// music-only, and send each for Telegram approval. They publish staggered
+// one per weekday via the */15 approved-posts cron above.
+
+let lastWeeklyReelsWeek = null;
+
+// Monday's ISO date (yyyy-mm-dd) for the current week — the "have we run this
+// week" key, so a PC asleep over the weekend still gets one run per week.
+function currentWeekKey(d = new Date()) {
+  const x = new Date(d);
+  const monOffset = (x.getDay() + 6) % 7; // 0=Mon .. 6=Sun
+  x.setDate(x.getDate() - monOffset);
+  return x.toISOString().slice(0, 10);
+}
+
+async function runWeeklyReels({ force = false } = {}) {
+  const wk = currentWeekKey();
+  if (!force && lastWeeklyReelsWeek === wk) {
+    console.log(`[${new Date().toISOString()}] Weekly reels: already run this week, skipping.`);
+    return;
+  }
+  lastWeeklyReelsWeek = wk;
+  try {
+    const { runWeeklySuperlatives } = require('./lib/lot-flow');
+    await runWeeklySuperlatives();
+  } catch (err) {
+    lastWeeklyReelsWeek = null; // allow a retry on the next wake-recovery tick
+    console.error(`[${new Date().toISOString()}] Weekly reels cron error: ${err.message}`);
+    try {
+      await sendNotification(`<b>Weekly reels cron failed:</b> ${err.message.slice(0, 200)}`);
+    } catch {}
+  }
+}
+
+cron.schedule('0 8 * * 1', runWeeklyReels);
+
+// Wake recovery — if it's Mon/Tue past 08:00 and we haven't run this week, run now.
+cron.schedule('*/30 * * * *', async () => {
+  const now = new Date();
+  const day = now.getDay(); // 0=Sun, 1=Mon, 2=Tue
+  if ((day === 1 || day === 2) && now.getHours() >= 8 && lastWeeklyReelsWeek !== currentWeekKey()) {
+    console.log(`[${now.toISOString()}] Wake recovery: missed this week's reels, running now...`);
+    await runWeeklyReels();
+  }
+});
+
 // ── TELEGRAM BOT POLLING ──
 // Listen for approve/reject button presses
 

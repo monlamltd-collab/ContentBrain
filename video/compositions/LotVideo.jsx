@@ -32,6 +32,7 @@ const LotVideo = ({
   archetype = 'best-yield',
   hookHeadline = '',
   keyBullets = [],
+  superlativeBadge = null,
   brand = { colours: { red: '#C0392B', green: '#0f8a5f' } },
   brandKey = 'auctionbrain',
   voiceoverFile = null,
@@ -121,7 +122,7 @@ const LotVideo = ({
           marginTop: 40,
           lineHeight: 1.15,
         }
-      }, archetypeLabel(archetype)),
+      }, superlativeBadge || archetypeLabel(archetype)),
       React.createElement('div', {
         style: {
           width: 96,
@@ -139,7 +140,7 @@ const LotVideo = ({
           marginTop: 28,
           textAlign: 'center',
         }
-      }, "Today's lot →")
+      }, superlativeBadge ? 'This week →' : "Today's lot →")
     ),
 
     // Address top
@@ -174,6 +175,33 @@ const LotVideo = ({
         }
       }, lot.postcode) : null
     ),
+
+    // Superlative badge — the "X of the week" series label, sits above the hook
+    superlativeBadge ? React.createElement('div', {
+      style: {
+        position: 'absolute',
+        top: '24%',
+        left: 64,
+        right: 64,
+        opacity: overlayOpacity,
+      }
+    },
+      React.createElement('div', {
+        style: {
+          display: 'inline-block',
+          fontFamily: t.fontHeading,
+          fontSize: 34,
+          fontWeight: 700,
+          letterSpacing: 1.5,
+          textTransform: 'uppercase',
+          color: '#ffffff',
+          backgroundColor: t.accent,
+          padding: '14px 28px',
+          borderRadius: 8,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.45)',
+        }
+      }, superlativeBadge)
+    ) : null,
 
     // Hook + price
     React.createElement('div', {
