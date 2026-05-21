@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
-const { timingSafeEqual } = require('crypto');
+const { timingSafeEqual, scryptSync, createHmac } = require('crypto');
 const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, insertPost, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById, getPublishedBlogPostsBothBrands, getPendingBriefsAll, dismissBrief } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendPostForReview, sendNotification, answerCallback, removeButtons, downloadTelegramFile, API, BOT_TOKEN, CHAT_ID } = require('./lib/telegram');
@@ -592,16 +592,64 @@ async function handleLeverCommand(text /* , msg */) {
 }
 const app = express();
 const PORT = process.env.PORT || 3000;
-const PASSWORD = process.env.REVIEW_UI_PASSWORD;
 
-// Constant-time string compare for session/password checks. Length mismatch
-// returns false without comparing bytes (length itself isn't a secret).
+// ── AUTH CONFIG ──
+// Preferred: scrypt-hashed password via DASHBOARD_PASSWORD_HASH + DASHBOARD_PASSWORD_SALT.
+// Generate these once locally with:  node scripts/gen-dashboard-hash.js
+// Then set both values in Railway environment variables.
+//
+// Legacy fallback: if neither hash var is set, REVIEW_UI_PASSWORD is used as
+// a plain-text comparison (backwards-compatible for local dev). Emit a warning
+// so it is not silently relied upon in production.
+const HASH = process.env.DASHBOARD_PASSWORD_HASH;
+const SALT = process.env.DASHBOARD_PASSWORD_SALT;
+const LEGACY_PASSWORD = process.env.REVIEW_UI_PASSWORD;
+
+if (!HASH && LEGACY_PASSWORD) {
+  console.warn('[auth] WARNING: using plaintext REVIEW_UI_PASSWORD. Run scripts/gen-dashboard-hash.js and set DASHBOARD_PASSWORD_HASH + DASHBOARD_PASSWORD_SALT to upgrade.');
+}
+if (!HASH && !LEGACY_PASSWORD) {
+  console.warn('[auth] WARNING: no password configured. All routes are unprotected. Set DASHBOARD_PASSWORD_HASH + DASHBOARD_PASSWORD_SALT.');
+}
+
+// Derive a stable session-cookie token from the hash so the cookie never
+// carries the plaintext password. HMAC with key=HASH means old cookies are
+// automatically invalidated when the hash changes.
+const SESSION_TOKEN = HASH
+  ? createHmac('sha256', HASH).update('session').digest('hex')
+  : (LEGACY_PASSWORD || '');
+
+// Constant-time Buffer compare. Length mismatch returns false without comparing bytes.
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
   if (aBuf.length !== bBuf.length) return false;
   return timingSafeEqual(aBuf, bBuf);
+}
+
+// Verify a submitted plaintext password against the configured credentials.
+// Returns true if the password is correct, false otherwise.
+function verifyPassword(submitted) {
+  if (typeof submitted !== 'string' || !submitted) return false;
+
+  if (HASH && SALT) {
+    try {
+      const candidate = scryptSync(submitted, SALT, 64).toString('hex');
+      // Both sides are fixed-length hex strings, so length will always match.
+      // Use timingSafeEqual directly on Buffers for constant-time comparison.
+      return timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(HASH, 'hex'));
+    } catch {
+      return false;
+    }
+  }
+
+  // Legacy plaintext fallback
+  if (LEGACY_PASSWORD) {
+    return safeEqual(submitted, LEGACY_PASSWORD);
+  }
+
+  return false;
 }
 
 app.use(express.json());
@@ -671,16 +719,17 @@ app.use('/api', reviewRouter);
 
 // ── AUTH MIDDLEWARE ──
 function requireAuth(req, res, next) {
-  // Check session cookie or query param — constant-time compare against PASSWORD
+  // No credentials configured — allow through (dev/unconfigured state already warned above).
+  if (!HASH && !LEGACY_PASSWORD) return next();
+
+  // Check session cookie or query param — constant-time compare against SESSION_TOKEN.
+  // SESSION_TOKEN is an HMAC of the hash, so it never carries the plaintext password.
   const token = req.cookies?.auth || req.query.token || req.headers['x-auth-token'];
-  if (PASSWORD && safeEqual(token, PASSWORD)) {
+  if (SESSION_TOKEN && safeEqual(token, SESSION_TOKEN)) {
     // First-hit-via-?token=: set the cookie and redirect to a clean URL so
-    // the secret doesn't linger in browser history. After this, the cookie
-    // covers subsequent navigation. Used for the AuctionBrain admin → ContentBrain
-    // bridge link: admin.html opens .../levers?token=<adminSecret>, this branch
-    // fires once, redirects to .../levers, browser stores the auth cookie.
+    // the secret doesn't linger in browser history.
     if (req.query.token && !req.cookies?.auth && req.method === 'GET') {
-      res.setHeader('Set-Cookie', `auth=${PASSWORD}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`);
+      res.setHeader('Set-Cookie', `auth=${SESSION_TOKEN}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`);
       const otherParams = new URLSearchParams();
       for (const [k, v] of Object.entries(req.query)) {
         if (k !== 'token' && typeof v === 'string') otherParams.append(k, v);
@@ -693,8 +742,6 @@ function requireAuth(req, res, next) {
 
   // Show login form for any HTML page route. /api/* and non-GET requests
   // get JSON 401 so client code can handle them programmatically.
-  // Previously this was hard-coded to '/' and '/content' only, so /social,
-  // /levers, and any new page route returned raw JSON to a logged-out user.
   if (req.method === 'GET' && !req.path.startsWith('/api/')) {
     return res.send(loginPage(null, req.path));
   }
@@ -704,14 +751,19 @@ function requireAuth(req, res, next) {
 // ── LOGIN ──
 app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
   const returnTo = (req.body.returnTo || '/').replace(/[^a-zA-Z0-9/_-]/g, '');
-  if (PASSWORD && safeEqual(req.body.password, PASSWORD)) {
-    res.setHeader('Set-Cookie', `auth=${PASSWORD}; HttpOnly; Path=/; Max-Age=86400`);
+  if (verifyPassword(req.body.password)) {
+    // Set cookie to the session token (HMAC-derived), never the plaintext password.
+    res.setHeader('Set-Cookie', `auth=${SESSION_TOKEN}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`);
     return res.redirect(returnTo || '/');
   }
   res.status(401).send(loginPage('Wrong password', returnTo));
 });
 
-// ── DASHBOARD ──
+// ── GROWTH BRAIN DASHBOARD ──
+// New HTMX dashboard at /dashboard (Phase A). Protected by requireAuth.
+app.use('/dashboard', requireAuth, require('./routes/dashboard'));
+
+// ── DASHBOARD (legacy review UI at /) ──
 app.get('/', requireAuth, async (req, res) => {
   try {
     const filter = req.query.type || 'all';
