@@ -39,13 +39,19 @@ beforeEach(() => {
 
 afterEach(() => {
   global.fetch = realFetch;
-  delete process.env.HUNTER_API_KEY;
+  // Set to empty string (not delete) — dotenv.config() inside the module
+  // re-runs on every require; an empty string is "set" and dotenv won't
+  // override it, so the requireKey() falsy check sees missing as intended.
+  process.env.HUNTER_API_KEY = '';
 });
 
 // ── Missing key ──────────────────────────────────────────────────────────
 
 test('enrichDomain: throws "Set HUNTER_API_KEY" when env missing', async () => {
-  delete process.env.HUNTER_API_KEY;
+  // Set to empty string (not delete) — dotenv.config() inside the module
+  // re-runs on every require; an empty string is "set" and dotenv won't
+  // override it, so the requireKey() falsy check sees missing as intended.
+  process.env.HUNTER_API_KEY = '';
   const { enrichDomain } = loadEnrichFresh();
   await assert.rejects(
     () => enrichDomain('asgfinance.co.uk'),
@@ -54,7 +60,10 @@ test('enrichDomain: throws "Set HUNTER_API_KEY" when env missing', async () => {
 });
 
 test('enrichEmail: throws "Set HUNTER_API_KEY" when env missing', async () => {
-  delete process.env.HUNTER_API_KEY;
+  // Set to empty string (not delete) — dotenv.config() inside the module
+  // re-runs on every require; an empty string is "set" and dotenv won't
+  // override it, so the requireKey() falsy check sees missing as intended.
+  process.env.HUNTER_API_KEY = '';
   const { enrichEmail } = loadEnrichFresh();
   await assert.rejects(
     () => enrichEmail('person@example.co.uk'),
