@@ -1173,6 +1173,39 @@ async function runGenerate({ force = false } = {}) {
   }
 }
 
+// Outbound sequence advance — every weekday at 09:00 London time. Mon-Fri
+// only avoids weekend sends (deliverability hit + bot-shaped); 09:00 lands
+// in UK working hours rather than the spam-coded 07:00 / 18:00 windows. The
+// `timezone` option handles BST/GMT switchovers automatically — `0 9 * * 1-5`
+// in UTC would be an hour late in summer, so always use the option, not the
+// expression. Researcher's full rationale: .ruflo/phase-c-design.md §2.
+//
+// Per-tick semantics: getDueSequences() returns rows where status='active'
+// AND next_scheduled_at <= now() AND current_step < MAX_STEP, ordered ASC
+// on next_scheduled_at so older-due rows go first. advanceSequence handles
+// the warming-cap defer and the Telegram approval queue — this cron is just
+// the trigger. See lib/sequence.js for the rest.
+cron.schedule('0 9 * * 1-5', async () => {
+  try {
+    const seq = require('./lib/sequence');
+    const due = await seq.getDueSequences();
+    if (!due.length) {
+      console.log(`[${new Date().toISOString()}] Cron seq-advance: no due sequences`);
+      return;
+    }
+    console.log(`[${new Date().toISOString()}] Cron seq-advance: ${due.length} due sequence(s)`);
+    for (const row of due) {
+      try {
+        await seq.advanceSequence(row.id);
+      } catch (err) {
+        console.error(`  seq-advance ${row.id} (step ${row.current_step}) failed: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Cron seq-advance error:`, err.message);
+  }
+}, { timezone: 'Europe/London' });
+
 // Publish approved posts every 15 minutes
 cron.schedule('*/15 * * * *', async () => {
   try {
