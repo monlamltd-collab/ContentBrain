@@ -652,6 +652,30 @@ function verifyPassword(submitted) {
   return false;
 }
 
+// Resend webhook — Phase B.
+// MUST be registered BEFORE express.json() because HMAC verification needs
+// the raw request body byte-for-byte; if express.json consumes the body
+// first, the signature check always fails. The route uses express.raw
+// scoped to this path only so the rest of the app still gets parsed JSON.
+app.post('/api/resend-webhook', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
+  try {
+    const { handleWebhook } = require('./lib/resend');
+    // Express lowercases header keys; pass them through verbatim.
+    const result = await handleWebhook(req.body, req.headers);
+    return res.status(200).json(result);
+  } catch (err) {
+    // Verification failures are 401; anything else is 500. The Resend dashboard
+    // surfaces both — 401 in particular tells Simon to check RESEND_WEBHOOK_SECRET.
+    const msg = err && err.message ? err.message : String(err);
+    if (/signature|verification/i.test(msg)) {
+      console.warn(`[POST /api/resend-webhook] 401: ${msg}`);
+      return res.status(401).json({ error: msg });
+    }
+    console.error(`[POST /api/resend-webhook] 500: ${msg}`);
+    return res.status(500).json({ error: msg });
+  }
+});
+
 app.use(express.json());
 app.use('/output', express.static(path.join(__dirname, 'output')));
 
@@ -1630,6 +1654,53 @@ async function pollTelegram() {
         } else {
           action = parts[0];
           postId = parts[1];
+        }
+
+        // Phase B — outbound (Resend) approve/reject. Routed BEFORE the
+        // social approve/reject branch so the outbound-specific publish
+        // path (cb:outbound-approve = approve AND send immediately, no
+        // scheduling delay) wins over the generic social one.
+        if (postId && action === 'outbound-approve') {
+          try {
+            const { publish } = require('./lib/publish');
+            const post = await getPostById(postId);
+            if (!post) throw new Error(`post ${postId} not found`);
+            await updatePostStatus(postId, 'approved');
+            // Re-read post so the publish path sees status=approved + the
+            // meta we approved on.
+            const approvedPost = await getPostById(postId);
+            const result = await publish(approvedPost);
+            const originalCaption = cb.message?.caption || cb.message?.text || '';
+            const trailer = result.suppressed
+              ? `\n\nAPPROVED · SUPPRESSED (${result.reason})`
+              : `\n\nAPPROVED · SENT (resend_id=${result.resendId || 'n/a'})`;
+            await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}${trailer}`);
+            await answerCallback(cb.id, result.suppressed ? 'Suppressed' : 'Sent');
+            console.log(`[Telegram] Outbound post ${postId} approved+sent`);
+          } catch (err) {
+            console.error(`[Telegram] Outbound approve failed for ${postId}: ${err.message}`);
+            await answerCallback(cb.id, 'Error — see logs');
+            try { await sendNotification(`Outbound send failed for ${postId}: ${err.message.slice(0, 200)}`); } catch {}
+          }
+          continue;
+        }
+
+        if (postId && action === 'outbound-reject') {
+          // Reuse the same rejection-reason capture flow as social — the
+          // text-message handler downstream already updates posts.status='rejected'
+          // with the captured feedback. Outbound posts share the posts table
+          // so the existing branch handles them.
+          pendingRejection = {
+            type: 'social', // reuses the social rejection branch (posts table)
+            postId,
+            chatId: cb.message.chat.id,
+            messageId: cb.message.message_id,
+            originalCaption: cb.message?.caption || cb.message?.text || ''
+          };
+          await answerCallback(cb.id, 'Why?');
+          await sendNotification("Why are you rejecting this outbound message? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          console.log(`[Telegram] Outbound rejection reason requested for ${postId}`);
+          continue;
         }
 
         if (postId && action === 'approve') {
