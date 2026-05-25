@@ -209,7 +209,7 @@ test('verifySignature: rejects when signature header missing', () => {
 });
 
 test('verifySignature: fails closed when RESEND_WEBHOOK_SECRET unset', () => {
-  delete process.env.RESEND_WEBHOOK_SECRET;
+  process.env.RESEND_WEBHOOK_SECRET = '';
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{}');
   assert.throws(

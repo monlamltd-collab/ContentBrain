@@ -156,8 +156,11 @@ test('sign: falls back to RESEND_WEBHOOK_SECRET when UNSUBSCRIBE_SECRET unset', 
 });
 
 test('sign: throws when BOTH secrets unset', () => {
-  delete process.env.UNSUBSCRIBE_SECRET;
-  delete process.env.RESEND_WEBHOOK_SECRET;
+  // Set to empty string (not delete) — dotenv re-runs on each require and
+  // would re-populate from .env where the key is real. Empty satisfies the
+  // override:false default so the falsy check sees missing.
+  process.env.UNSUBSCRIBE_SECRET = '';
+  process.env.RESEND_WEBHOOK_SECRET = '';
   const u = setupMocks();
   assert.throws(() => u.sign('a@b.co'), /Set UNSUBSCRIBE_SECRET/);
 });
