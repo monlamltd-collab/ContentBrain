@@ -139,7 +139,11 @@ test('sendOutbound: rejects when `to` missing', async () => {
 });
 
 test('sendOutbound: rejects when API key missing', async () => {
-  delete process.env.RESEND_API_KEY;
+  // Empty string (not delete) — dotenv.config() runs on every require and
+  // would re-populate a deleted env var from .env. Empty is still "set" so
+  // dotenv's default override:false leaves it alone, and getClient()'s
+  // falsy check sees missing as intended.
+  process.env.RESEND_API_KEY = '';
   const { sendOutbound } = loadResendFresh();
   await assert.rejects(
     () => sendOutbound({
@@ -205,7 +209,7 @@ test('verifySignature: rejects when signature header missing', () => {
 });
 
 test('verifySignature: fails closed when RESEND_WEBHOOK_SECRET unset', () => {
-  delete process.env.RESEND_WEBHOOK_SECRET;
+  process.env.RESEND_WEBHOOK_SECRET = '';
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{}');
   assert.throws(

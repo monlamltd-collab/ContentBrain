@@ -676,6 +676,44 @@ app.post('/api/resend-webhook', express.raw({ type: 'application/json', limit: '
   }
 });
 
+// Unsubscribe endpoint — Phase B follow-up (GDPR/PECR).
+// Public (no auth) — anyone with a valid token can opt out. Two methods:
+//   GET  /u?e=&t=  — HTML confirmation page (regular click-through)
+//   POST /u?e=&t=  — one-click (RFC 8058, fired by Gmail/Outlook native UI)
+//
+// Both verify the HMAC token; mismatch → 404 (do not reveal which addresses
+// are real). On success, the recipient is added to `suppression` with
+// reason='unsubscribe' — idempotent via addSuppression's no-op-on-duplicate.
+async function handleUnsubscribe(req, res) {
+  try {
+    const { applyUnsubscribe } = require('./lib/unsubscribe');
+    const e = (req.query && req.query.e) || (req.body && req.body.e);
+    const t = (req.query && req.query.t) || (req.body && req.body.t);
+    const result = await applyUnsubscribe(e, t);
+    if (!result.ok) {
+      // 404 not 401 — don't tell scrapers which addresses are real.
+      return res.status(404).send('Not found');
+    }
+    if (req.method === 'POST') {
+      return res.status(200).json({ ok: true });
+    }
+    return res.status(200).send(
+      `<!doctype html><meta charset="utf-8"><title>Unsubscribed</title>` +
+      `<body style="font:16px system-ui;margin:60px auto;max-width:480px;text-align:center;">` +
+      `<h1 style="font-weight:600;">You're unsubscribed</h1>` +
+      `<p>We won't email <strong>${result.email.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}</strong> again.</p>` +
+      `<p style="color:#888;font-size:13px;">If this was a mistake, reply to the original email and we'll fix it.</p>` +
+      `</body>`
+    );
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.error(`[unsubscribe] ${req.method} /u: ${msg}`);
+    return res.status(500).send('Server error');
+  }
+}
+app.get('/u', handleUnsubscribe);
+app.post('/u', express.urlencoded({ extended: false }), handleUnsubscribe);
+
 app.use(express.json());
 app.use('/output', express.static(path.join(__dirname, 'output')));
 
@@ -1145,16 +1183,26 @@ cron.schedule('*/15 * * * *', async () => {
     for (const post of posts) {
       try {
         const result = await publish(post);
-        await updatePostStatus(post.id, 'published');
-        // Store Facebook post ID for insights tracking
-        if (result.postId) {
-          const { supabase } = require('./lib/supabase');
-          // Supabase query builder isn't a real Promise — .catch() before await throws TypeError
-          try {
-            await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id);
-          } catch (e) { console.warn(`  fb_post_id save failed: ${e.message}`); }
+        // Outbound (Resend) path owns its own status writes inside publishToResend —
+        // 'suppressed' on a block, no write on a deferred (warming/paused). Only
+        // mark 'published' here when publish actually delivered (social path or
+        // a clean outbound send).
+        if (result.suppressed) {
+          console.log(`  Skipped: ${post.id} (${post.brand}) — already marked suppressed`);
+        } else if (result.deferred) {
+          console.log(`  Deferred: ${post.id} (${post.brand}/${post.track || ''}) — ${result.reason}; cron retries next tick`);
+        } else {
+          await updatePostStatus(post.id, 'published');
+          // Store Facebook post ID for insights tracking
+          if (result.postId) {
+            const { supabase } = require('./lib/supabase');
+            // Supabase query builder isn't a real Promise — .catch() before await throws TypeError
+            try {
+              await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id);
+            } catch (e) { console.warn(`  fb_post_id save failed: ${e.message}`); }
+          }
+          console.log(`  Published: ${post.id} (${post.brand}/${post.platform || post.channel || 'n/a'}) ref:${result.postId || result.resendId || 'n/a'}`);
         }
-        console.log(`  Published: ${post.id} (${post.brand}/${post.platform}) fb:${result.postId || 'n/a'}`);
       } catch (err) {
         console.error(`  Error publishing ${post.id}: ${err.message}`);
         // Notify on publish failure so it doesn't silently fail
@@ -1671,11 +1719,22 @@ async function pollTelegram() {
             const approvedPost = await getPostById(postId);
             const result = await publish(approvedPost);
             const originalCaption = cb.message?.caption || cb.message?.text || '';
-            const trailer = result.suppressed
-              ? `\n\nAPPROVED · SUPPRESSED (${result.reason})`
-              : `\n\nAPPROVED · SENT (resend_id=${result.resendId || 'n/a'})`;
+            let trailer;
+            let toast;
+            if (result.suppressed) {
+              trailer = `\n\nAPPROVED · SUPPRESSED (${result.reason})`;
+              toast = 'Suppressed';
+            } else if (result.deferred) {
+              const b = result.budget;
+              const detail = b ? ` (day ${b.day}, cap ${b.cap}, sent ${b.sentToday})` : '';
+              trailer = `\n\nAPPROVED · DEFERRED — ${result.reason}${detail} · cron retries tomorrow`;
+              toast = 'Deferred (warming)';
+            } else {
+              trailer = `\n\nAPPROVED · SENT (resend_id=${result.resendId || 'n/a'})`;
+              toast = 'Sent';
+            }
             await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}${trailer}`);
-            await answerCallback(cb.id, result.suppressed ? 'Suppressed' : 'Sent');
+            await answerCallback(cb.id, toast);
             console.log(`[Telegram] Outbound post ${postId} approved+sent`);
           } catch (err) {
             console.error(`[Telegram] Outbound approve failed for ${postId}: ${err.message}`);
