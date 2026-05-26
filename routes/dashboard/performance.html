@@ -7,11 +7,11 @@
   public/dashboard/index.html).
 
   Inner #perf-content fetches /api/dashboard/performance/metrics?window=7d
-  on load and on every radio change. The metrics endpoint (server.js) is
-  the coder's deliverable; it returns rendered HTML, NOT JSON, so HTMX
-  can swap it directly. If the coder prefers JSON + client-side render,
-  flip hx-swap to a custom JS handler — but server-rendered HTML is the
-  Phase A/C house style and what the rest of the dashboard uses.
+  on load and on every radio change. The metrics endpoint returns rendered
+  HTML containing two <section> blocks: content engagement (posts /
+  reach / engagement / top-3) and outbound conversion (per-track funnel
+  table with rows for prospects / contacts / sequences / sent / opens /
+  replies / interested / meetings).
 -->
 
 <section class="perf-tab">
@@ -27,14 +27,17 @@
         hx-target="#perf-content"
         hx-swap="innerHTML"
         hx-trigger="change">
-    <label>
-      <input type="radio" name="window" value="7d" checked> 7 days
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="7d" checked>
+      <span>7 days</span>
     </label>
-    <label>
-      <input type="radio" name="window" value="30d"> 30 days
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="30d">
+      <span>30 days</span>
     </label>
-    <label>
-      <input type="radio" name="window" value="all"> All time
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="all">
+      <span>All time</span>
     </label>
   </form>
 

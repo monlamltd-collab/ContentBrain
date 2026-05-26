@@ -840,13 +840,26 @@ app.use('/dashboard', requireAuth, require('./routes/dashboard'));
 // and the layout reference.
 app.get('/api/dashboard/performance/metrics', requireAuth, async (req, res) => {
   try {
-    const window = ['7d', '30d', 'all'].includes(req.query.window) ? req.query.window : '7d';
-    // STUB — coder wires the queries + render.
-    // const { renderPerformanceFragment } = require('./lib/dashboard/performance-queries');
-    // const html = await renderPerformanceFragment(window);
-    // res.set('Content-Type', 'text/html; charset=utf-8').send(html);
-    res.set('Content-Type', 'text/html; charset=utf-8')
-       .send(`<p class="loading">Performance metrics for window=${window} — coder TODO (Phase D).</p>`);
+    // Accept either `window=7d|30d|all` (HTMX form value) or `days=7|30`
+    // (explicit numeric override). Default 7 days.
+    const winParam = req.query.window;
+    const daysParam = req.query.days;
+    let windowDays = 7;
+    if (daysParam != null) {
+      const n = parseInt(daysParam, 10);
+      if (Number.isFinite(n) && n > 0) windowDays = n;
+    } else if (winParam === '30d') {
+      windowDays = 30;
+    } else if (winParam === 'all') {
+      windowDays = 'all';
+    } else {
+      windowDays = 7;
+    }
+
+    const { getMetrics, renderPerformanceFragment } = require('./lib/dashboard/performance-queries');
+    const metrics = await getMetrics({ windowDays });
+    const html = renderPerformanceFragment({ windowDays, metrics });
+    res.set('Content-Type', 'text/html; charset=utf-8').send(html);
   } catch (err) {
     console.error('[api/dashboard/performance/metrics] error:', err.message);
     res.status(500).set('Content-Type', 'text/html; charset=utf-8')
