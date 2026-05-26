@@ -1,0 +1,47 @@
+<!--
+  Phase D — Performance dashboard partial.
+
+  Loaded into #tab-content by routes/dashboard/performance.js. The window
+  selector swaps only the #perf-content div via HTMX; switching tabs
+  swaps the whole fragment (handled by the parent dashboard shell at
+  public/dashboard/index.html).
+
+  Inner #perf-content fetches /api/dashboard/performance/metrics?window=7d
+  on load and on every radio change. The metrics endpoint (server.js) is
+  the coder's deliverable; it returns rendered HTML, NOT JSON, so HTMX
+  can swap it directly. If the coder prefers JSON + client-side render,
+  flip hx-swap to a custom JS handler — but server-rendered HTML is the
+  Phase A/C house style and what the rest of the dashboard uses.
+-->
+
+<section class="perf-tab">
+  <header class="perf-header">
+    <h2>Performance</h2>
+    <p class="perf-sub">
+      Content engagement &amp; outbound conversion across all three tracks.
+    </p>
+  </header>
+
+  <form class="perf-window-selector"
+        hx-get="/api/dashboard/performance/metrics"
+        hx-target="#perf-content"
+        hx-swap="innerHTML"
+        hx-trigger="change">
+    <label>
+      <input type="radio" name="window" value="7d" checked> 7 days
+    </label>
+    <label>
+      <input type="radio" name="window" value="30d"> 30 days
+    </label>
+    <label>
+      <input type="radio" name="window" value="all"> All time
+    </label>
+  </form>
+
+  <div id="perf-content"
+       hx-get="/api/dashboard/performance/metrics?window=7d"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading metrics&hellip;</p>
+  </div>
+</section>
