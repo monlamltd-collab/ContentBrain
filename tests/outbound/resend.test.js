@@ -170,42 +170,70 @@ test('sendOutbound: adds List-Unsubscribe headers', async () => {
   assert.equal(headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
 });
 
-// ── HMAC signature verification ──────────────────────────────────────────
+// ── Svix signature verification ──────────────────────────────────────────
+//
+// Resend's webhook signing is Svix. Helpers below match the verifier in
+// lib/resend.js: secret has a `whsec_` prefix + base64 body; the signed
+// payload is `${svix-id}.${svix-timestamp}.${body}`; signature is base64.
 
-test('verifySignature: accepts a good signature', () => {
+const TEST_SECRET_RAW = 'test-webhook-secret-bytes';   // arbitrary string
+const TEST_SECRET_WHSEC = 'whsec_' + Buffer.from(TEST_SECRET_RAW).toString('base64');
+const TEST_SECRET_BYTES = Buffer.from(Buffer.from(TEST_SECRET_RAW).toString('base64'), 'base64');
+
+function svixSign(body, { id = 'msg_abc', timestamp = Math.floor(Date.now() / 1000) } = {}) {
+  const bodyBuf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const toSign = Buffer.concat([Buffer.from(`${id}.${timestamp}.`, 'utf8'), bodyBuf]);
+  const sig = crypto.createHmac('sha256', TEST_SECRET_BYTES).update(toSign).digest('base64');
+  return {
+    'svix-id': id,
+    'svix-timestamp': String(timestamp),
+    'svix-signature': `v1,${sig}`,
+  };
+}
+
+test('verifySignature: accepts a good Svix signature', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from(JSON.stringify({ type: 'email.delivered', data: { email_id: 'abc' } }));
-  const sig = crypto.createHmac('sha256', 'test-webhook-secret').update(body).digest('hex');
-
-  assert.equal(verifySignature(body, { 'resend-signature': sig }), true);
+  assert.equal(verifySignature(body, svixSign(body)), true);
 });
 
-test('verifySignature: accepts Svix-style "v1,<sig>" header', () => {
+test('verifySignature: accepts header with multiple "v1,<sig>" parts (key rotation)', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{"hello":"world"}');
-  const sig = crypto.createHmac('sha256', 'test-webhook-secret').update(body).digest('hex');
-
-  assert.equal(verifySignature(body, { 'svix-signature': `v1,${sig}` }), true);
+  const headers = svixSign(body);
+  // Prepend a bogus sig — accepting any-match.
+  headers['svix-signature'] = `v1,${'A'.repeat(44)} ${headers['svix-signature']}`;
+  assert.equal(verifySignature(body, headers), true);
 });
 
 test('verifySignature: rejects a bad signature', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{"hello":"world"}');
-  const badSig = '0'.repeat(64);
-
-  assert.throws(
-    () => verifySignature(body, { 'resend-signature': badSig }),
-    /signature mismatch/,
-  );
+  const headers = svixSign(body);
+  headers['svix-signature'] = 'v1,' + Buffer.alloc(32).toString('base64');
+  assert.throws(() => verifySignature(body, headers), /signature mismatch/);
 });
 
 test('verifySignature: rejects when signature header missing', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{"hello":"world"}');
   assert.throws(
     () => verifySignature(body, {}),
-    /missing resend-signature/,
+    /missing svix-id/,
   );
+});
+
+test('verifySignature: rejects when timestamp is outside ±5 min', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
+  const { verifySignature } = loadResendFresh();
+  const body = Buffer.from('{"hello":"world"}');
+  const old = Math.floor(Date.now() / 1000) - 10 * 60;  // 10 min ago
+  const headers = svixSign(body, { timestamp: old });
+  assert.throws(() => verifySignature(body, headers), /tolerance/);
 });
 
 test('verifySignature: fails closed when RESEND_WEBHOOK_SECRET unset', () => {
@@ -213,15 +241,16 @@ test('verifySignature: fails closed when RESEND_WEBHOOK_SECRET unset', () => {
   const { verifySignature } = loadResendFresh();
   const body = Buffer.from('{}');
   assert.throws(
-    () => verifySignature(body, { 'resend-signature': 'aa' }),
+    () => verifySignature(body, { 'svix-signature': 'v1,aa' }),
     /RESEND_WEBHOOK_SECRET/,
   );
 });
 
 test('verifySignature: rejects when rawBody is missing', () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { verifySignature } = loadResendFresh();
   assert.throws(
-    () => verifySignature(null, { 'resend-signature': 'aa' }),
+    () => verifySignature(null, { 'svix-signature': 'v1,aa', 'svix-id': 'a', 'svix-timestamp': String(Math.floor(Date.now()/1000)) }),
     /rawBody is required/,
   );
 });
@@ -229,13 +258,13 @@ test('verifySignature: rejects when rawBody is missing', () => {
 // ── handleWebhook: bounce → addSuppression call routed ───────────────────
 
 test('handleWebhook: email.bounced routes to addSuppression', async () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
   const { handleWebhook } = loadResendFresh();
 
   const event = { type: 'email.bounced', data: { email_id: 'abc', to: ['bounce@x.co'] } };
   const body = Buffer.from(JSON.stringify(event));
-  const sig = crypto.createHmac('sha256', 'test-webhook-secret').update(body).digest('hex');
 
-  const res = await handleWebhook(body, { 'resend-signature': sig });
+  const res = await handleWebhook(body, svixSign(body));
   assert.equal(res.handled, true);
   assert.equal(res.type, 'email.bounced');
   assert.equal(addSuppressionCalls.length, 1);
