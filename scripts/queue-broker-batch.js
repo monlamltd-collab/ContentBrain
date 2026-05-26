@@ -39,20 +39,22 @@ async function getAlreadyQueuedContactIds() {
 
 async function pickBatch(count) {
   const seen = await getAlreadyQueuedContactIds();
+  // Push the type filter INTO the SQL via prospects!inner(...).eq() — without
+  // it the alphabetical email ordering brings other tracks' contacts in first
+  // and consumes the SQL limit before any broker row is reached.
   const { data, error } = await supabase
     .from('contacts')
     .select(`
       id, name, role, email, confidence_score, prospect_id,
       prospect:prospects!inner ( id, type, company_name, website, metadata )
     `)
+    .eq('prospect.type', TRACK)
     .gte('confidence_score', 50)
     .order('email')
     .limit(count + seen.size + 20);
   if (error) throw new Error(`pickBatch failed: ${error.message}`);
 
-  const fresh = (data || []).filter(c =>
-    !seen.has(c.id) && c.prospect && c.prospect.type === TRACK
-  );
+  const fresh = (data || []).filter(c => !seen.has(c.id));
   return fresh.slice(0, count);
 }
 
