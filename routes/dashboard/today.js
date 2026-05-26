@@ -71,7 +71,7 @@ function buildOutboundCard(post) {
   // hx-prompt captures Simon's reason/feedback for reject + revise.
   return `<div class="card outbound" id="card-${post.id}">
   <div class="card-header">
-    <input type="checkbox" class="bulk-select" data-post-id="${post.id}" onchange="updateBulkBar()" />
+    <input type="checkbox" class="bulk-select" name="postId" value="${post.id}" data-post-id="${post.id}" onchange="updateBulkBar()" />
     <span class="badge brand-${escHtml(brand)}">${escHtml(brand)}</span>
     <span class="badge track-badge">${escHtml(track)}</span>
     ${step ? `<span class="badge step-badge">${step}</span>` : ''}

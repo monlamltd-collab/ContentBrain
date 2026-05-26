@@ -8,14 +8,22 @@
 // POST /dashboard/approve/outbound/bulk         — Phase E: bulk-approve up to bulk_approve_cap outbound drafts.
 //
 // HTMX fragments — each POST returns a card-shaped HTML snippet (or, for
-// bulk, a tab re-render with a banner). All require no auth in this
-// router because the parent /dashboard mount is auth-gated upstream
-// (see routes/dashboard/index.js + the global requireAuth wrapper in
+// bulk, a summary banner). All require no auth in this router because the
+// parent /dashboard mount is auth-gated upstream (see
+// routes/dashboard/index.js + the global requireAuth wrapper in
 // server.js).
+//
+// Body-parser scoped to THIS router only — HTMX submits the bulk-approve
+// form as application/x-www-form-urlencoded with repeated `postId` fields.
+// We scope to the router rather than globally so we don't accidentally
+// double-parse other routes whose body-parser layer is different.
 
 const express = require('express');
 const router = express.Router();
-const { getApprovedPosts } = require('../../lib/supabase');
+const { getApprovedPosts, getPostById, supabase } = require('../../lib/supabase');
+const { publish } = require('../../lib/publish');
+
+router.use(express.urlencoded({ extended: false }));
 
 router.get('/', async (req, res) => {
   try {
@@ -52,105 +60,263 @@ router.get('/', async (req, res) => {
 });
 
 // ── Phase E: outbound action endpoints ────────────────────────────────────
-//
-// Stubs for the Phase E coder. The handler bodies below describe the
-// expected behaviour as code-shaped TODO comments — the coder wires in
-// publish()/updatePostStatus()/getPostById() and writes the card-shaped
-// response fragments. Each route is mounted so HTMX in today.js renders
-// the correct hx-post URL; calling them today will surface 501s loudly.
 
 /**
- * Approve + send a single outbound draft. Mirrors the Telegram
- * cb:outbound-approve flow at server.js:1786 — coder should extract the
- * shared logic into a helper (e.g. lib/closed-loop/outbound-approval.js
- * or inline alongside this route) so both surfaces stay in sync.
+ * Approve + send one outbound draft.
  *
- * Behaviour to implement:
- *  1. updatePostStatus(req.params.id, 'approved')
- *  2. const post = await getPostById(req.params.id)
- *  3. const result = await publish(post)  // routes to publishToResend
- *  4. publishToResend now sends a Telegram receipt on success (see
- *     lib/publish.js — Phase E commit 5).
- *  5. Return card-shaped HTML fragment with the result inline:
- *       SUCCESS  → '<div class="card outbound sent">Sent to {email}</div>'
- *       SUPPRESSED → '<div class="card outbound suppressed">…</div>'
- *       DEFERRED → '<div class="card outbound deferred">…</div>'
- *     Status code 200 in all of these (HTMX swaps on 2xx).
- *  6. On error → 500 + '<div class="error">…</div>' fragment.
+ * publish() routes outbound posts (track='outbound' OR channel='resend')
+ * through publishToResend, which itself handles suppression / warming-cap
+ * deferrals / sequence-row side effects and sends the quiet Telegram
+ * receipt on success. The publishToResend status update flips the post to
+ * 'published' (or 'suppressed') — we don't need to flip it ourselves here.
  */
 router.post('/outbound/:id/approve', async (req, res) => {
-  // BODY DELIBERATELY OMITTED — Phase E coder stub.
-  res.status(501).send('<div class="error">outbound approve not implemented (Phase E coder stub)</div>');
+  const id = req.params.id;
+  try {
+    const post = await getPostById(id);
+    if (!post) {
+      return res.status(404).send(`<div class="error">Post ${escHtml(id)} not found.</div>`);
+    }
+    const result = await approveAndSendOne(post);
+    res.set('HX-Trigger', 'outbound-card-changed');
+    res.send(renderApproveResult(post, result));
+  } catch (err) {
+    console.error(`[dashboard/approve] approve ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Approve failed: ${escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * Reject an outbound draft. Optional `reason` form field captured via
- * HTMX hx-prompt — coder stores it in posts.rejection_feedback so the
- * social-side learning loop can pull it via getRecentRejectedPosts().
- *
- * Behaviour to implement:
- *  1. const reason = (req.body.prompt || req.body.reason || '').trim() || null;
- *     // HTMX hx-prompt submits the captured value under the form-field
- *     // name 'HX-Prompt' as a header AND as a body field depending on
- *     // version — read both. Phase B's existing reject endpoints in
- *     // server.js use req.headers['hx-prompt']; mirror that.
- *  2. await supabase.from('posts').update({
- *       status: 'rejected',
- *       rejection_feedback: reason,
- *     }).eq('id', req.params.id);
- *  3. Return '' (empty fragment) so the card disappears on swap.
+ * Reject an outbound draft. The optional reason is sent by HTMX as the
+ * HX-Prompt request header (NOT a form field — Phase B's reject endpoints
+ * in server.js follow this same convention). We persist it to
+ * posts.rejection_feedback so the social-side learning loop's
+ * getRecentRejectedPosts() can read it back.
  */
 router.post('/outbound/:id/reject', async (req, res) => {
-  // BODY DELIBERATELY OMITTED — Phase E coder stub.
-  res.status(501).send('<div class="error">outbound reject not implemented (Phase E coder stub)</div>');
+  const id = req.params.id;
+  try {
+    const rawReason = req.headers['hx-prompt'];
+    const reason = (typeof rawReason === 'string' ? rawReason : '').trim() || null;
+
+    const { error } = await supabase
+      .from('posts')
+      .update({ status: 'rejected', rejection_feedback: reason })
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+
+    console.log(`[dashboard/approve] rejected outbound post ${id}${reason ? ` (reason: ${reason})` : ''}`);
+    res.set('HX-Trigger', 'outbound-card-changed');
+    // Empty fragment — HTMX outerHTML-swap erases the card.
+    res.send('');
+  } catch (err) {
+    console.error(`[dashboard/approve] reject ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Reject failed: ${escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * Revise an outbound draft — stash-only per Simon's Phase E call. Auto-
- * regen is deferred to Phase F.
- *
- * Behaviour to implement:
- *  1. const feedback = req.headers['hx-prompt'] || req.body.feedback || '';
- *  2. Read post.meta; merge { revision_request: feedback.trim() } into it.
- *  3. supabase.from('posts').update({ status: 'draft', meta: { ...meta, revision_request } }).eq('id', id)
- *     // Setting status='draft' has no effect on the publish cron — the
- *     // post is already 'draft' when revise is clicked. The explicit set
- *     // is belt-and-braces for future auto-regen-from-meta flows.
- *  4. Return a card-shaped fragment that re-renders the same draft with
- *     a small "Pending revision: {feedback}" badge, so Simon can edit
- *     the body in place or queue a re-generation manually.
+ * Stash a revision request and drop back to draft. Re-renders the same
+ * card with a "Pending revision: <feedback>" badge so Simon can see what
+ * he asked for. Auto-regen is deferred to Phase F per the design doc.
  */
 router.post('/outbound/:id/revise', async (req, res) => {
-  // BODY DELIBERATELY OMITTED — Phase E coder stub.
-  res.status(501).send('<div class="error">outbound revise not implemented (Phase E coder stub)</div>');
+  const id = req.params.id;
+  try {
+    const rawFeedback = req.headers['hx-prompt'];
+    const feedback = (typeof rawFeedback === 'string' ? rawFeedback : '').trim();
+
+    const post = await getPostById(id);
+    if (!post) {
+      return res.status(404).send(`<div class="error">Post ${escHtml(id)} not found.</div>`);
+    }
+
+    const newMeta = { ...(post.meta || {}), revision_request: feedback || null };
+    const { error } = await supabase
+      .from('posts')
+      .update({ status: 'draft', meta: newMeta })
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+
+    console.log(`[dashboard/approve] revise stashed for post ${id}${feedback ? ` (feedback: ${feedback})` : ''}`);
+    res.set('HX-Trigger', 'outbound-card-changed');
+    res.send(renderRevisionCard({ ...post, meta: newMeta }, feedback));
+  } catch (err) {
+    console.error(`[dashboard/approve] revise ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Revise failed: ${escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * Bulk-approve a batch of outbound drafts.
- *
- * HTMX form-encodes the checkbox values as repeated `postId` fields
- * (since the checkboxes in today.js use name="postId" via the
- * hx-include=".bulk-select:checked" attribute — coder may need to
- * add the name attribute to the checkbox markup, currently it relies
- * on data-post-id; switch to name="postId" value="{id}" for the form
- * encode to work).
- *
- * Behaviour to implement:
- *  1. const cap = await getAppConfigNumber('dashboard.bulk_approve_cap', 10);
- *  2. const ids = [].concat(req.body.postId || []).slice(0, cap);
- *  3. For each id: call the same approve+send helper as
- *     /outbound/:id/approve. Collect { id, ok, reason } results.
- *  4. Re-render the Approve tab fragment (call into today.js render
- *     OR inline the same fetch-and-render logic) with a banner at the
- *     top summarising results: "Sent N; suppressed K; deferred M;
- *     errored E."
- *  5. If req.body.postId.length > cap, banner notes the truncation:
- *     "Capped at {cap} — selected {N}, processed {cap}, rest unchanged."
+ * Bulk-approve. Loops SEQUENTIALLY (Resend rate-limit + warming cap make
+ * parallel sends unsafe — one suppressed/deferred result must be visible
+ * before the next send starts). Capped at app_config.dashboard.bulk_approve_cap.
  */
 router.post('/outbound/bulk', async (req, res) => {
-  // BODY DELIBERATELY OMITTED — Phase E coder stub.
-  res.status(501).send('<div class="error">outbound bulk-approve not implemented (Phase E coder stub)</div>');
+  try {
+    const cap = await loadBulkApproveCap();
+    const rawIds = req.body && req.body.postId;
+    const allIds = Array.isArray(rawIds) ? rawIds : (rawIds ? [rawIds] : []);
+    const ids = allIds.slice(0, cap);
+    const truncated = allIds.length > cap;
+
+    if (!ids.length) {
+      return res.send('<div class="bulk-summary empty">No outbound drafts were selected.</div>');
+    }
+
+    let approved = 0;
+    let suppressed = 0;
+    let deferred = 0;
+    let errored = 0;
+    const details = [];
+
+    for (const id of ids) {
+      try {
+        const post = await getPostById(id);
+        if (!post) {
+          errored += 1;
+          details.push(`${id}: not found`);
+          continue;
+        }
+        const result = await approveAndSendOne(post);
+        if (result.suppressed)      { suppressed += 1; details.push(`${shortTo(post)}: suppressed (${result.reason})`); }
+        else if (result.deferred)   { deferred   += 1; details.push(`${shortTo(post)}: deferred (${result.reason})`); }
+        else                        { approved   += 1; details.push(`${shortTo(post)}: sent`); }
+      } catch (err) {
+        errored += 1;
+        details.push(`${id}: ${err.message}`);
+      }
+    }
+
+    res.set('HX-Trigger', 'outbound-card-changed');
+    res.send(renderBulkSummary({
+      approved, suppressed, deferred, errored,
+      total: ids.length, selected: allIds.length, cap, truncated, details,
+    }));
+  } catch (err) {
+    console.error(`[dashboard/approve] bulk: ${err.message}`);
+    res.status(500).send(`<div class="error">Bulk approve failed: ${escHtml(err.message)}</div>`);
+  }
 });
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Approve + send one post. updatePostStatus to 'approved' isn't strictly
+ * necessary because publishToResend will flip status to 'published' /
+ * 'suppressed' / leave it 'approved' on defer — but doing it up-front
+ * means a mid-send crash leaves the post in 'approved' (cron-pickable)
+ * rather than 'draft' (Simon has to re-approve from scratch).
+ */
+async function approveAndSendOne(post) {
+  // Mark approved first so the cron can pick it up if the immediate publish
+  // call crashes (defensive belt-and-braces — Simon-shaped UX is no
+  // forgotten drafts).
+  const { error: aErr } = await supabase
+    .from('posts')
+    .update({ status: 'approved', approved_at: new Date().toISOString() })
+    .eq('id', post.id);
+  if (aErr) throw new Error(`status update failed: ${aErr.message}`);
+
+  const result = await publish({ ...post, status: 'approved' });
+  return result || { ok: true };
+}
+
+async function loadBulkApproveCap() {
+  const DEFAULT_CAP = 10;
+  try {
+    const { data, error } = await supabase
+      .from('app_config')
+      .select('value')
+      .eq('brand', 'global')
+      .eq('key', 'dashboard.bulk_approve_cap')
+      .maybeSingle();
+    if (error) {
+      console.warn(`[dashboard/approve] bulk_approve_cap read failed: ${error.message}`);
+      return DEFAULT_CAP;
+    }
+    if (!data) return DEFAULT_CAP;
+    const v = data.value;
+    const n = typeof v === 'number' ? v : (typeof v === 'string' ? parseInt(v, 10) : NaN);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_CAP;
+  } catch (err) {
+    console.warn(`[dashboard/approve] bulk_approve_cap threw: ${err.message}`);
+    return DEFAULT_CAP;
+  }
+}
+
+function shortTo(post) {
+  const meta = post.meta || {};
+  return meta.contact_email || meta.to || post.id;
+}
+
+function renderApproveResult(post, result) {
+  const id = post.id;
+  const to = escHtml(shortTo(post));
+  if (result && result.suppressed) {
+    return `<div class="card outbound suppressed" id="card-${id}"><strong>Suppressed</strong> — ${to} (${escHtml(result.reason || 'unknown')})</div>`;
+  }
+  if (result && result.deferred) {
+    return `<div class="card outbound deferred" id="card-${id}"><strong>Deferred</strong> — ${to} (${escHtml(result.reason || 'unknown')})</div>`;
+  }
+  return `<div class="card outbound sent" id="card-${id}"><strong>Sent</strong> to ${to}</div>`;
+}
+
+function renderRevisionCard(post, feedback) {
+  const meta = post.meta || {};
+  const brand = post.brand || 'bridgematch';
+  const track = post.track || meta.track || 'outbound';
+  const step = meta.sequence_step ? `step ${escHtml(String(meta.sequence_step))}` : '';
+  const company = escHtml(meta.company_name || (meta.prospect && meta.prospect.company_name) || '(unknown company)');
+  const contactEmail = escHtml(meta.contact_email || meta.to || '(no email)');
+  const subject = escHtml(post.copy_headline || '(no subject)');
+  const body = escHtml(post.copy_body || '');
+  const badge = feedback
+    ? `<span class="badge revision-badge">Pending revision: ${escHtml(feedback)}</span>`
+    : `<span class="badge revision-badge">Pending revision</span>`;
+
+  return `<div class="card outbound revising" id="card-${post.id}">
+  <div class="card-header">
+    <input type="checkbox" class="bulk-select" name="postId" value="${post.id}" data-post-id="${post.id}" onchange="updateBulkBar()" />
+    <span class="badge brand-${escHtml(brand)}">${escHtml(brand)}</span>
+    <span class="badge track-badge">${escHtml(track)}</span>
+    ${step ? `<span class="badge step-badge">${step}</span>` : ''}
+    ${badge}
+    <span class="muted"> to &lt;${contactEmail}&gt; at ${company}</span>
+  </div>
+  <div class="copy">
+    <strong>Subject:</strong> ${subject}
+    <details><summary>Expand body</summary><pre class="outbound-body">${body}</pre></details>
+  </div>
+  <div class="actions">
+    <button class="btn approve"
+      hx-post="/dashboard/approve/outbound/${post.id}/approve"
+      hx-target="#card-${post.id}"
+      hx-swap="outerHTML"
+      hx-confirm="Approve and send to ${contactEmail}?">Approve &amp; send</button>
+    <button class="btn revise"
+      hx-post="/dashboard/approve/outbound/${post.id}/revise"
+      hx-target="#card-${post.id}"
+      hx-swap="outerHTML"
+      hx-prompt="Update revision note">Revise</button>
+    <button class="btn reject"
+      hx-post="/dashboard/approve/outbound/${post.id}/reject"
+      hx-target="#card-${post.id}"
+      hx-swap="outerHTML"
+      hx-prompt="Why? (optional — helps future generation)">Reject</button>
+  </div>
+</div>`;
+}
+
+function renderBulkSummary({ approved, suppressed, deferred, errored, total, selected, cap, truncated, details }) {
+  const lines = [];
+  lines.push(`<strong>Bulk approve:</strong> ${approved} sent, ${suppressed} suppressed, ${deferred} deferred, ${errored} errored (of ${total}).`);
+  if (truncated) {
+    lines.push(`<br/><span class="muted">Capped at ${cap} — selected ${selected}, processed ${total}; the rest are unchanged.</span>`);
+  }
+  const detailRows = details.map(d => `<li>${escHtml(d)}</li>`).join('');
+  return `<div class="bulk-summary">${lines.join('')}<ul class="bulk-details">${detailRows}</ul></div>`;
+}
 
 function escHtml(s) {
   return String(s ?? '')
