@@ -1,0 +1,50 @@
+<!--
+  Phase D — Performance dashboard partial.
+
+  Loaded into #tab-content by routes/dashboard/performance.js. The window
+  selector swaps only the #perf-content div via HTMX; switching tabs
+  swaps the whole fragment (handled by the parent dashboard shell at
+  public/dashboard/index.html).
+
+  Inner #perf-content fetches /api/dashboard/performance/metrics?window=7d
+  on load and on every radio change. The metrics endpoint returns rendered
+  HTML containing two <section> blocks: content engagement (posts /
+  reach / engagement / top-3) and outbound conversion (per-track funnel
+  table with rows for prospects / contacts / sequences / sent / opens /
+  replies / interested / meetings).
+-->
+
+<section class="perf-tab">
+  <header class="perf-header">
+    <h2>Performance</h2>
+    <p class="perf-sub">
+      Content engagement &amp; outbound conversion across all three tracks.
+    </p>
+  </header>
+
+  <form class="perf-window-selector"
+        hx-get="/api/dashboard/performance/metrics"
+        hx-target="#perf-content"
+        hx-swap="innerHTML"
+        hx-trigger="change">
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="7d" checked>
+      <span>7 days</span>
+    </label>
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="30d">
+      <span>30 days</span>
+    </label>
+    <label class="perf-window-opt">
+      <input type="radio" name="window" value="all">
+      <span>All time</span>
+    </label>
+  </form>
+
+  <div id="perf-content"
+       hx-get="/api/dashboard/performance/metrics?window=7d"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="loading">Loading metrics&hellip;</p>
+  </div>
+</section>

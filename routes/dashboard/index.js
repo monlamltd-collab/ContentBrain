@@ -3,17 +3,19 @@
 //
 // Mounts the dashboard sub-routes and serves the shell HTML.
 //
-// GET  /dashboard          — full-page shell (loads HTMX, shows Today tab by default)
-// GET  /dashboard/today    — HTMX partial: posts awaiting review
-// GET  /dashboard/approve  — HTMX partial: approved posts queued for publish
+// GET  /dashboard              — full-page shell (loads HTMX, shows Today tab by default)
+// GET  /dashboard/today        — HTMX partial: posts awaiting review
+// GET  /dashboard/approve      — HTMX partial: approved posts queued for publish
+// GET  /dashboard/performance  — HTMX partial: content + outbound metrics (Phase D)
 
 const express = require('express');
 const path = require('path');
 const router = express.Router();
 
 // Sub-route partials
-router.use('/today',   require('./today'));
-router.use('/approve', require('./approve'));
+router.use('/today',       require('./today'));
+router.use('/approve',     require('./approve'));
+router.use('/performance', require('./performance'));
 
 // Shell — serves public/dashboard/index.html
 router.get('/', (req, res) => {

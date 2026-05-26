@@ -825,6 +825,48 @@ app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
 // New HTMX dashboard at /dashboard (Phase A). Protected by requireAuth.
 app.use('/dashboard', requireAuth, require('./routes/dashboard'));
 
+// Phase D — Performance tab metrics endpoint.
+//
+// Returns the rendered metrics fragment for the Performance partial's
+// inner #perf-content div (server-rendered HTML, NOT JSON — matches the
+// HTMX house style; routes/dashboard/today.js and approve.js do the same).
+//
+// Query: ?window=7d|30d|all (default 7d).
+//
+// Implementation note for the coder: SQL helpers live in
+// lib/dashboard/performance-queries.js. Page-load fires ~28 sub-millisecond
+// queries (4 content + 8 outbound × 3 tracks); no caching needed at
+// current volumes. See .ruflo/phase-d-design.md §4 for the SQL sketches
+// and the layout reference.
+app.get('/api/dashboard/performance/metrics', requireAuth, async (req, res) => {
+  try {
+    // Accept either `window=7d|30d|all` (HTMX form value) or `days=7|30`
+    // (explicit numeric override). Default 7 days.
+    const winParam = req.query.window;
+    const daysParam = req.query.days;
+    let windowDays = 7;
+    if (daysParam != null) {
+      const n = parseInt(daysParam, 10);
+      if (Number.isFinite(n) && n > 0) windowDays = n;
+    } else if (winParam === '30d') {
+      windowDays = 30;
+    } else if (winParam === 'all') {
+      windowDays = 'all';
+    } else {
+      windowDays = 7;
+    }
+
+    const { getMetrics, renderPerformanceFragment } = require('./lib/dashboard/performance-queries');
+    const metrics = await getMetrics({ windowDays });
+    const html = renderPerformanceFragment({ windowDays, metrics });
+    res.set('Content-Type', 'text/html; charset=utf-8').send(html);
+  } catch (err) {
+    console.error('[api/dashboard/performance/metrics] error:', err.message);
+    res.status(500).set('Content-Type', 'text/html; charset=utf-8')
+       .send(`<p class="error">Failed to load metrics: ${String(err.message).replace(/[<>&"]/g, '?')}</p>`);
+  }
+});
+
 // ── DASHBOARD (legacy review UI at /) ──
 app.get('/', requireAuth, async (req, res) => {
   try {

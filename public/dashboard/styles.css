@@ -207,3 +207,137 @@ main {
   background: #fde8e8;
   border-radius: 8px;
 }
+
+/* ── Performance tab (Phase D) ── */
+
+.perf-tab .perf-header h2 {
+  font-size: 22px;
+  margin-bottom: 4px;
+}
+
+.perf-tab .perf-sub {
+  color: #666;
+  font-size: 13px;
+  margin-bottom: 18px;
+}
+
+.perf-window-selector {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.perf-window-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 18px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.perf-window-opt input[type="radio"] {
+  margin: 0;
+}
+
+.perf-window-opt:has(input:checked) {
+  background: #1a2b4b;
+  color: #faf8f4;
+  border-color: #1a2b4b;
+}
+
+.perf-section {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
+}
+
+.perf-section h3 {
+  font-size: 15px;
+  margin-bottom: 14px;
+  color: #1a2b4b;
+}
+
+.perf-section .perf-window {
+  color: #888;
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.perf-content-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.perf-content-stats div {
+  background: #faf8f4;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+
+.perf-content-stats dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.perf-content-stats dd {
+  font-size: 22px;
+  font-weight: 600;
+  color: #1a2b4b;
+}
+
+.perf-top3 {
+  list-style: decimal;
+  padding-left: 22px;
+  color: #333;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.perf-top3 li.empty {
+  list-style: none;
+  margin-left: -22px;
+  color: #999;
+}
+
+.perf-funnel-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.perf-funnel-table th,
+.perf-funnel-table td {
+  padding: 8px 12px;
+  text-align: right;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.perf-funnel-table thead th {
+  background: #faf8f4;
+  color: #1a2b4b;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.perf-funnel-table tbody th[scope="row"] {
+  text-align: left;
+  font-weight: 600;
+  color: #1a2b4b;
+}
+
+.perf-funnel-table tr:last-child td,
+.perf-funnel-table tr:last-child th {
+  border-bottom: none;
+}
