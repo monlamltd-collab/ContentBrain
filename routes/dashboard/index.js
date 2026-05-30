@@ -7,6 +7,7 @@
 // GET  /dashboard/today        — HTMX partial: posts awaiting review
 // GET  /dashboard/approve      — HTMX partial: approved posts queued for publish
 // GET  /dashboard/performance  — HTMX partial: content + outbound metrics (Phase D)
+// GET  /dashboard/pipeline     — HTMX partial: reply triage + sequence state (Phase F-1)
 
 const express = require('express');
 const path = require('path');
@@ -16,6 +17,7 @@ const router = express.Router();
 router.use('/today',       require('./today'));
 router.use('/approve',     require('./approve'));
 router.use('/performance', require('./performance'));
+router.use('/pipeline',    require('./pipeline'));
 
 // Shell — serves public/dashboard/index.html
 router.get('/', (req, res) => {

@@ -7,9 +7,9 @@
   dashboard shell at public/dashboard/index.html).
 
   The three sections sub-load themselves on page open (hx-trigger="load"):
-    A. #needs-attention   ← /api/dashboard/pipeline/needs-attention?window=7d&intent=interested,questions,hostile,complaint
-    B. #active-sequences  ← /api/dashboard/pipeline/active-sequences?track=all&page=0
-    C. #recent-activity   ← /api/dashboard/pipeline/recent-activity?window=24h
+    A. #needs-attention   ← /dashboard/pipeline/needs-attention?window=7d&intent=interested,questions,hostile,complaint
+    B. #active-sequences  ← /dashboard/pipeline/active-sequences?track=all&page=0
+    C. #recent-activity   ← /dashboard/pipeline/recent-activity?window=24h
 
   Window selector at the top updates the hx-vals attributes Sections A and
   C read off; track chips on Section B re-fetch Section B only. See
@@ -25,7 +25,7 @@
   </header>
 
   <form class="pipeline-window-selector"
-        hx-get="/api/dashboard/pipeline/needs-attention"
+        hx-get="/dashboard/pipeline/needs-attention"
         hx-target="#needs-attention"
         hx-swap="innerHTML"
         hx-trigger="change">
@@ -51,7 +51,7 @@
   <section class="pipeline-section pipeline-section-a">
     <h3>Needs attention</h3>
     <div id="needs-attention"
-         hx-get="/api/dashboard/pipeline/needs-attention?window=7d&amp;intent=interested,questions,hostile,complaint"
+         hx-get="/dashboard/pipeline/needs-attention?window=7d&amp;intent=interested,questions,hostile,complaint"
          hx-trigger="load"
          hx-swap="innerHTML">
       <p class="loading">Loading needs-attention queue&hellip;</p>
@@ -63,7 +63,7 @@
     <h3>Active sequences</h3>
 
     <form class="pipeline-track-chips"
-          hx-get="/api/dashboard/pipeline/active-sequences"
+          hx-get="/dashboard/pipeline/active-sequences"
           hx-target="#active-sequences"
           hx-swap="innerHTML"
           hx-trigger="change">
@@ -86,7 +86,7 @@
     </form>
 
     <div id="active-sequences"
-         hx-get="/api/dashboard/pipeline/active-sequences?track=all&amp;page=0"
+         hx-get="/dashboard/pipeline/active-sequences?track=all&amp;page=0"
          hx-trigger="load"
          hx-swap="innerHTML">
       <p class="loading">Loading active sequences&hellip;</p>
@@ -97,7 +97,7 @@
   <section class="pipeline-section pipeline-section-c">
     <h3>Recent activity</h3>
     <div id="recent-activity"
-         hx-get="/api/dashboard/pipeline/recent-activity?window=24h"
+         hx-get="/dashboard/pipeline/recent-activity?window=24h"
          hx-trigger="load"
          hx-swap="innerHTML">
       <p class="loading">Loading recent activity&hellip;</p>

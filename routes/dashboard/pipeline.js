@@ -29,9 +29,9 @@
 // hx-trigger="load" inside the main GET / fragment so the page renders
 // the shell instantly and each section fills as its query returns):
 //
-//   GET /api/dashboard/pipeline/needs-attention?window=7d&intent=interested,questions
-//   GET /api/dashboard/pipeline/active-sequences?track=lender&page=0
-//   GET /api/dashboard/pipeline/recent-activity?window=24h
+//   GET /dashboard/pipeline/needs-attention?window=7d&intent=interested,questions
+//   GET /dashboard/pipeline/active-sequences?track=lender&page=0
+//   GET /dashboard/pipeline/recent-activity?window=24h
 //
 // Body-parser scoped to THIS router only (HTMX POSTs come as
 // application/x-www-form-urlencoded). Same pattern as
@@ -94,7 +94,7 @@ router.get('/', (_req, res) => {
 // ── Section A: needs attention ────────────────────────────────────────────
 
 /**
- * GET /api/dashboard/pipeline/needs-attention
+ * GET /dashboard/pipeline/needs-attention
  *
  * Query params:
  *   - window: '24h' | '7d' | '30d' | 'all'   default '7d'
@@ -121,7 +121,7 @@ router.get('/needs-attention', async (_req, res) => {
 // ── Section B: active sequences ───────────────────────────────────────────
 
 /**
- * GET /api/dashboard/pipeline/active-sequences
+ * GET /dashboard/pipeline/active-sequences
  *
  * Query params:
  *   - track: 'all' | 'lender' | 'broker' | 'auction_house'   default 'all'
@@ -144,7 +144,7 @@ router.get('/active-sequences', async (_req, res) => {
 // ── Section C: recent activity ────────────────────────────────────────────
 
 /**
- * GET /api/dashboard/pipeline/recent-activity
+ * GET /dashboard/pipeline/recent-activity
  *
  * Query params:
  *   - window: '24h' | '7d' | '30d' | 'all'   default '24h'
@@ -165,7 +165,7 @@ router.get('/recent-activity', async (_req, res) => {
 // ── Reply quick actions ───────────────────────────────────────────────────
 
 /**
- * POST /api/dashboard/pipeline/reply/:id/resolve
+ * POST /dashboard/pipeline/reply/:id/resolve
  *
  * Flip `replies.requires_human=false`. Preserves the original
  * `processed_at` (use COALESCE — don't bump it; the activity feed in
@@ -184,7 +184,7 @@ router.post('/reply/:id/resolve', async (_req, res) => {
 });
 
 /**
- * POST /api/dashboard/pipeline/reply/:id/meeting-booked
+ * POST /dashboard/pipeline/reply/:id/meeting-booked
  *
  * Set `contacts.metadata.meeting_booked_at = now()` for the reply's
  * contact (merge into existing metadata jsonb — don't overwrite). Also
@@ -208,7 +208,7 @@ router.post('/reply/:id/meeting-booked', async (_req, res) => {
 });
 
 /**
- * POST /api/dashboard/pipeline/reply/:id/wrong-contact
+ * POST /dashboard/pipeline/reply/:id/wrong-contact
  *
  * Three atomic side-effects, executed in this order:
  *   1. addSuppression(contact.email, 'wrong_person')        — lib/suppression.js
@@ -242,7 +242,7 @@ router.post('/reply/:id/wrong-contact', async (_req, res) => {
 // ── Sequence quick actions ────────────────────────────────────────────────
 
 /**
- * POST /api/dashboard/pipeline/sequence/:id/pause
+ * POST /dashboard/pipeline/sequence/:id/pause
  *
  * Calls `pauseSequence(id, 'manual_pause')` from lib/sequence.js. No-op
  * when already paused (the helper handles idempotency). Returns the
@@ -258,7 +258,7 @@ router.post('/sequence/:id/pause', async (_req, res) => {
 });
 
 /**
- * POST /api/dashboard/pipeline/sequence/:id/force-next
+ * POST /dashboard/pipeline/sequence/:id/force-next
  *
  * Bypass the cron's `WHERE next_scheduled_at <= now()` guard by clearing
  * `next_scheduled_at` first, then calling `advanceSequence(id)` from
