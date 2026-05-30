@@ -1,0 +1,106 @@
+<!--
+  Phase F-1 — Pipeline dashboard partial.
+
+  Loaded into #tab-content by routes/dashboard/pipeline.js. The window
+  selector + intent chips swap only the three section divs via HTMX;
+  switching tabs swaps the whole fragment (handled by the parent
+  dashboard shell at public/dashboard/index.html).
+
+  The three sections sub-load themselves on page open (hx-trigger="load"):
+    A. #needs-attention   ← /api/dashboard/pipeline/needs-attention?window=7d&intent=interested,questions,hostile,complaint
+    B. #active-sequences  ← /api/dashboard/pipeline/active-sequences?track=all&page=0
+    C. #recent-activity   ← /api/dashboard/pipeline/recent-activity?window=24h
+
+  Window selector at the top updates the hx-vals attributes Sections A and
+  C read off; track chips on Section B re-fetch Section B only. See
+  .ruflo/phase-f-pipeline-tab-design.md §1.4 for the rationale.
+-->
+
+<section class="pipeline-tab">
+  <header class="pipeline-header">
+    <h2>Pipeline</h2>
+    <p class="pipeline-sub">
+      Reply triage and sequence state. What needs you, what's in flight, what's just happened.
+    </p>
+  </header>
+
+  <form class="pipeline-window-selector"
+        hx-get="/api/dashboard/pipeline/needs-attention"
+        hx-target="#needs-attention"
+        hx-swap="innerHTML"
+        hx-trigger="change">
+    <label class="pipeline-window-opt">
+      <input type="radio" name="window" value="24h">
+      <span>Last 24h</span>
+    </label>
+    <label class="pipeline-window-opt">
+      <input type="radio" name="window" value="7d" checked>
+      <span>Last 7 days</span>
+    </label>
+    <label class="pipeline-window-opt">
+      <input type="radio" name="window" value="30d">
+      <span>Last 30 days</span>
+    </label>
+    <label class="pipeline-window-opt">
+      <input type="radio" name="window" value="all">
+      <span>All time</span>
+    </label>
+  </form>
+
+  <!-- Section A — Needs attention -->
+  <section class="pipeline-section pipeline-section-a">
+    <h3>Needs attention</h3>
+    <div id="needs-attention"
+         hx-get="/api/dashboard/pipeline/needs-attention?window=7d&amp;intent=interested,questions,hostile,complaint"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading needs-attention queue&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Section B — Active sequences -->
+  <section class="pipeline-section pipeline-section-b">
+    <h3>Active sequences</h3>
+
+    <form class="pipeline-track-chips"
+          hx-get="/api/dashboard/pipeline/active-sequences"
+          hx-target="#active-sequences"
+          hx-swap="innerHTML"
+          hx-trigger="change">
+      <label class="pipeline-track-opt">
+        <input type="radio" name="track" value="all" checked>
+        <span>All</span>
+      </label>
+      <label class="pipeline-track-opt">
+        <input type="radio" name="track" value="lender">
+        <span>Lender</span>
+      </label>
+      <label class="pipeline-track-opt">
+        <input type="radio" name="track" value="broker">
+        <span>Broker</span>
+      </label>
+      <label class="pipeline-track-opt">
+        <input type="radio" name="track" value="auction_house">
+        <span>Auction house</span>
+      </label>
+    </form>
+
+    <div id="active-sequences"
+         hx-get="/api/dashboard/pipeline/active-sequences?track=all&amp;page=0"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading active sequences&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Section C — Recent activity -->
+  <section class="pipeline-section pipeline-section-c">
+    <h3>Recent activity</h3>
+    <div id="recent-activity"
+         hx-get="/api/dashboard/pipeline/recent-activity?window=24h"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading recent activity&hellip;</p>
+    </div>
+  </section>
+</section>
