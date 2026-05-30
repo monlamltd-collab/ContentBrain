@@ -40,6 +40,13 @@
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Pipeline</button>
+      <button class="tab"
+        role="tab"
+        hx-get="/dashboard/settings"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Settings</button>
     </nav>
   </header>
 
@@ -55,6 +62,20 @@
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
     }
+
+    // Settings tab — live update for char counters + range sliders.
+    // Delegated input listener so it works for HTMX-swapped controls too.
+    document.addEventListener('input', function (e) {
+      var t = e.target;
+      if (!t) return;
+      if (t.tagName === 'TEXTAREA' && t.hasAttribute('maxlength')) {
+        var counter = t.parentElement && t.parentElement.querySelector('.char-count');
+        if (counter) counter.textContent = String(t.value.length);
+      } else if (t.tagName === 'INPUT' && t.type === 'range') {
+        var out = t.parentElement && t.parentElement.querySelector('.range-value');
+        if (out) out.textContent = t.value;
+      }
+    });
   </script>
 </body>
 </html>

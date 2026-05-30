@@ -1,0 +1,153 @@
+<!--
+  Phase F-2 — Settings dashboard partial.
+
+  Loaded into #tab-content by routes/dashboard/settings.js. Four sections,
+  each sub-loads its own initial state via hx-trigger="load" so this shell
+  is I/O-free and the user sees the anchor nav instantly.
+
+  Sections:
+    1. Outbound       — per-track collapsible cards (3 tracks)
+    2. Suppression    — search + add form + paginated table
+    3. Content        — active brands + template weights + per-brand directive
+    4. System         — bulk-approve cap, Telegram receipt, suppression check (DANGER)
+
+  Sticky anchor nav at the top jumps to each section.
+  See .ruflo/phase-f-settings-tab-design.md §1 for the rationale.
+-->
+
+<section class="settings-tab">
+  <header class="settings-header">
+    <h2>Settings</h2>
+    <p class="settings-sub">
+      Tune outbound, manage suppressions, steer content, flip system switches.
+      Every change auto-saves; the &ldquo;Saved&rdquo; flash confirms.
+    </p>
+  </header>
+
+  <!-- Sticky jump nav — native scroll, no JS, no HTMX -->
+  <nav class="settings-anchors" aria-label="Settings sections">
+    <a href="#section-outbound">Outbound</a>
+    <a href="#section-suppression">Suppression</a>
+    <a href="#section-content">Content</a>
+    <a href="#section-system">System</a>
+  </nav>
+
+  <!-- Section 1 — Outbound (per-track controls) -->
+  <section class="settings-section section-outbound" id="section-outbound">
+    <h3>Outbound</h3>
+    <p class="settings-section-sub">
+      Per-track warming status, pause/resume, steady-state cap, from-address and tone overrides.
+      Each track is collapsed by default &mdash; click to expand.
+    </p>
+
+    <div id="outbound-lender"
+         class="settings-track-block"
+         hx-get="/dashboard/settings/outbound/lender/status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading lender track&hellip;</p>
+    </div>
+
+    <div id="outbound-broker"
+         class="settings-track-block"
+         hx-get="/dashboard/settings/outbound/broker/status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading broker track&hellip;</p>
+    </div>
+
+    <div id="outbound-auction_house"
+         class="settings-track-block"
+         hx-get="/dashboard/settings/outbound/auction_house/status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading auction house track&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Section 2 — Suppression list -->
+  <section class="settings-section section-suppression" id="section-suppression">
+    <h3>Suppression list</h3>
+    <p class="settings-section-sub">
+      Addresses and domains the system will never send to.
+      Add manually below or remove a row to lift the block.
+    </p>
+
+    <!-- Search filter — submits via HTMX into the table wrap below -->
+    <form class="suppression-search"
+          hx-get="/dashboard/settings/suppression"
+          hx-target="#suppression-table-wrap"
+          hx-swap="innerHTML"
+          hx-trigger="input changed delay:300ms, search">
+      <label>
+        Search
+        <input type="search" name="q" placeholder="e.g. example.com or noreply@&hellip;">
+      </label>
+    </form>
+
+    <!-- Manual add form -->
+    <form class="suppression-add settings-control"
+          hx-post="/dashboard/settings/suppression/add"
+          hx-target="#suppression-tbody"
+          hx-swap="afterbegin"
+          hx-on:htmx:after-request="if(event.detail.successful) this.reset()">
+      <label>
+        Email or domain
+        <input type="text" name="email_or_domain" required
+               placeholder="noreply@example.com or example.com">
+      </label>
+      <label>
+        Reason
+        <select name="reason" required>
+          <option value="manual" selected>manual</option>
+          <option value="bounce">bounce</option>
+          <option value="complaint">complaint</option>
+          <option value="hostile_reply">hostile_reply</option>
+          <option value="unsubscribe">unsubscribe</option>
+          <option value="wrong_person">wrong_person</option>
+          <option value="import">import</option>
+        </select>
+      </label>
+      <button type="submit">Add to suppression</button>
+    </form>
+
+    <!-- Paginated table -->
+    <div id="suppression-table-wrap"
+         hx-get="/dashboard/settings/suppression?page=0"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading suppression list&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Section 3 — Content (social-side levers) -->
+  <section class="settings-section section-content" id="section-content">
+    <h3>Content</h3>
+    <p class="settings-section-sub">
+      Active brands, template mix, editorial directives.
+      Same levers as the Telegram <code>/active</code>, <code>/templates</code>, <code>/directive</code> commands.
+    </p>
+
+    <div id="content-brands"
+         hx-get="/dashboard/settings/content/brands"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading brand levers&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Section 4 — System (meta switches) -->
+  <section class="settings-section section-system" id="section-system">
+    <h3>System</h3>
+    <p class="settings-section-sub">
+      Dashboard-wide toggles. Handle the suppression-check switch with care &mdash; disabling it breaks PECR compliance.
+    </p>
+
+    <div id="system-section"
+         hx-get="/dashboard/settings/system"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="loading">Loading system levers&hellip;</p>
+    </div>
+  </section>
+</section>
