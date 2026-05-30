@@ -688,18 +688,9 @@ app.post('/api/resend-webhook', express.raw({ type: 'application/json', limit: '
 // or markBoostFailed depending on payload.status. Idempotent on request_id
 // (== boost_runs.id) — last-write-wins for boost_campaign_id / boost_ad_id.
 app.post('/api/social-boost-callback', express.raw({ type: 'application/json', limit: '256kb' }), async (req, res) => {
-  // Stub for coder — per phase-g3-design §3.4 Route A:
-  //   1. verifyInbound(req.body, req.headers) — throws -> 401
-  //   2. JSON.parse(req.body.toString('utf8')) -> {request_id, status,
-  //      boost_campaign_id, boost_ad_id, started_at, error_message}
-  //   3. if !request_id -> 400
-  //   4. switch on status:
-  //        'active' -> markBoostActive(request_id, {boost_campaign_id, boost_ad_id, started_at})
-  //        'failed' -> markBoostFailed(request_id, error_message || 'Make reported failed')
-  //        else     -> 400 unknown status
-  //   5. return 200 { ok: true, status: row.status }
-  //   6. catch: signature/verification -> 401, else -> 500
-  return res.status(501).json({ error: 'NOT_IMPLEMENTED: /api/social-boost-callback' });
+  const { handleBoostCallback } = require('./lib/social-engine/routes');
+  const helpers = require('./lib/social-engine/helpers');
+  return handleBoostCallback(req, res, helpers);
 });
 
 // Route B — Make -> CB after daily reconcile pulls insights. HMAC-verified.
@@ -708,18 +699,9 @@ app.post('/api/social-boost-callback', express.raw({ type: 'application/json', l
 // aborting subsequent rows. Idempotent — markBoostMetrics is UPDATE-by-
 // campaign-id, not accumulating.
 app.post('/api/social-boost-reconcile', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
-  // Stub for coder — per phase-g3-design §3.4 Route B:
-  //   1. verifyInbound(req.body, req.headers) — throws -> 401
-  //   2. const { as_of, metrics } = JSON.parse(req.body.toString('utf8'))
-  //   3. if !Array.isArray(metrics) -> 400
-  //   4. for m of metrics:
-  //        try markBoostMetrics(m.boost_campaign_id, { ...m, as_of })
-  //           -> push {campaign: m.boost_campaign_id, ok: true, status: row.status}
-  //        catch rowErr
-  //           -> push {campaign: m.boost_campaign_id, ok: false, error: rowErr.message}
-  //   5. return 200 { ok: true, processed: results.length, results }
-  //   6. catch: signature/verification -> 401, else -> 500
-  return res.status(501).json({ error: 'NOT_IMPLEMENTED: /api/social-boost-reconcile' });
+  const { handleBoostReconcile } = require('./lib/social-engine/routes');
+  const helpers = require('./lib/social-engine/helpers');
+  return handleBoostReconcile(req, res, helpers);
 });
 
 // Route C — Make pulls this once per reconcile run to find which boost_runs
@@ -727,27 +709,9 @@ app.post('/api/social-boost-reconcile', express.raw({ type: 'application/json', 
 // MAKE_WEBHOOK_SECRET. The route accepts either x-cb-signature header OR
 // query-string ?sig= (Make's HTTP module supports either).
 app.get('/api/social-boost-active', express.raw({ type: 'application/json', limit: '4kb' }), async (req, res) => {
-  // Stub for coder — per phase-g3-design §3.4 Route C:
-  //   1. Build a headers map that includes both req.headers and a synthetic
-  //      'x-cb-signature' from req.query.sig (when present) so verifyInbound
-  //      accepts either auth carrier. Note: GET bodies are typically empty;
-  //      pass req.body || Buffer.alloc(0).
-  //      verifyInbound(req.body || Buffer.alloc(0), {...req.headers, 'x-cb-signature': req.headers['x-cb-signature'] || req.query.sig})
-  //   2. supabase.from('boost_runs').select('id, boost_campaign_id, status,
-  //        started_at, duration_hours').in('status', ['pending','active'])
-  //        .not('boost_campaign_id','is',null).order('started_at',{ascending:false})
-  //   3. return 200 { runs: data.map(r => ({ request_id: r.id, boost_campaign_id,
-  //                                          status, started_at, duration_hours })) }
-  //   4. catch: signature/verification -> 401, else -> 500
-  // NOTE: Make's verifyInbound looks for 'x-make-signature'. For this route
-  // we instead want 'x-cb-signature' (Make signs WITH MAKE_WEBHOOK_SECRET
-  // because it's the outbound-to-CB direction from Make's POV reversed —
-  // Make is acting as a client TO us, but the secret it uses is the one
-  // we'd otherwise use to sign OUR outbound). Easiest fix: add a thin
-  // verifyOutbound(rawBody, headers) helper in webhook-auth.js that reads
-  // MAKE_WEBHOOK_SECRET and looks at x-cb-signature. Coder note: this is
-  // a SECOND helper to add in webhook-auth.js — log it for sign-off.
-  return res.status(501).json({ error: 'NOT_IMPLEMENTED: /api/social-boost-active' });
+  const { handleBoostActive } = require('./lib/social-engine/routes');
+  const { supabase } = require('./lib/supabase');
+  return handleBoostActive(req, res, { supabase });
 });
 
 // Unsubscribe endpoint — Phase B follow-up (GDPR/PECR).
@@ -1367,7 +1331,7 @@ cron.schedule('*/15 * * * *', async () => {
               // Telegram outage to cascade into the publish loop.
               console.warn(`  [boost] hook failed for ${post.id}: ${err.message}`);
               try {
-                await sendNotification(`Boost request failed for post ${post.id}: ${err.message.slice(0, 120)}`);
+                await sendNotification(`Boost request failed for post ${post.id}: ${err.message.slice(0, 200)}`);
               } catch (_) { /* swallow — Telegram outage must not break publish */ }
             }
           }
