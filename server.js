@@ -676,6 +676,44 @@ app.post('/api/resend-webhook', express.raw({ type: 'application/json', limit: '
   }
 });
 
+// Phase G-3 — Make boost integration callback routes. ALL THREE registered
+// BEFORE express.json() for the same reason as resend-webhook above: HMAC
+// verification needs the raw request body bytes verbatim. Each uses
+// express.raw scoped to its own path.
+//
+// See .ruflo/phase-g3-design.md §3.4 for the contract.
+
+// Route A — Make -> CB after boost create completes (active OR failed).
+// HMAC-verified via webhook-auth.verifyInbound. Calls helpers.markBoostActive
+// or markBoostFailed depending on payload.status. Idempotent on request_id
+// (== boost_runs.id) — last-write-wins for boost_campaign_id / boost_ad_id.
+app.post('/api/social-boost-callback', express.raw({ type: 'application/json', limit: '256kb' }), async (req, res) => {
+  const { handleBoostCallback } = require('./lib/social-engine/routes');
+  const helpers = require('./lib/social-engine/helpers');
+  return handleBoostCallback(req, res, helpers);
+});
+
+// Route B — Make -> CB after daily reconcile pulls insights. HMAC-verified.
+// Iterates payload.metrics[] and calls markBoostMetrics(boost_campaign_id, ...)
+// per row. Per-row errors caught and returned in the response without
+// aborting subsequent rows. Idempotent — markBoostMetrics is UPDATE-by-
+// campaign-id, not accumulating.
+app.post('/api/social-boost-reconcile', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
+  const { handleBoostReconcile } = require('./lib/social-engine/routes');
+  const helpers = require('./lib/social-engine/helpers');
+  return handleBoostReconcile(req, res, helpers);
+});
+
+// Route C — Make pulls this once per reconcile run to find which boost_runs
+// to fetch insights for. HMAC-verified — Make signs an empty body via
+// MAKE_WEBHOOK_SECRET. The route accepts either x-cb-signature header OR
+// query-string ?sig= (Make's HTTP module supports either).
+app.get('/api/social-boost-active', express.raw({ type: 'application/json', limit: '4kb' }), async (req, res) => {
+  const { handleBoostActive } = require('./lib/social-engine/routes');
+  const { supabase } = require('./lib/supabase');
+  return handleBoostActive(req, res, { supabase });
+});
+
 // Unsubscribe endpoint — Phase B follow-up (GDPR/PECR).
 // Public (no auth) — anyone with a valid token can opt out. Two methods:
 //   GET  /u?e=&t=  — HTML confirmation page (regular click-through)
@@ -1287,7 +1325,14 @@ cron.schedule('*/15 * * * *', async () => {
               const { requestBoost } = require('./lib/social-engine/boost');
               await requestBoost(post, result.postId);
             } catch (err) {
+              // Phase G-3 — surface boost-hook failures to Telegram so the
+              // operator notices when Make is paused / unreachable. Catch
+              // the sendNotification's own failure too — we never want a
+              // Telegram outage to cascade into the publish loop.
               console.warn(`  [boost] hook failed for ${post.id}: ${err.message}`);
+              try {
+                await sendNotification(`Boost request failed for post ${post.id}: ${err.message.slice(0, 200)}`);
+              } catch (_) { /* swallow — Telegram outage must not break publish */ }
             }
           }
 
@@ -1303,6 +1348,22 @@ cron.schedule('*/15 * * * *', async () => {
     console.error(`[${new Date().toISOString()}] Cron publish error:`, err.message);
   }
 });
+
+// Phase G-3 — daily audience snapshot cron. 06:30 UTC = strictly AFTER the
+// Make reconcile scenario fires at 06:00 UTC, so PR4's dashboard rows for
+// social_audience_daily + boost_runs align same-morning. UTC (not
+// Europe/London) so DST changes never shift the slot. See
+// .ruflo/phase-g3-design.md §2.3 for rationale.
+cron.schedule('30 6 * * *', async () => {
+  try {
+    const { runDailyAudienceSnapshot } = require('./lib/social-engine/audience');
+    await runDailyAudienceSnapshot();
+  } catch (err) {
+    // runDailyAudienceSnapshot should never throw (it catches per-brand
+    // and surfaces Telegram alerts itself). Belt-and-braces — log here too.
+    console.error(`[${new Date().toISOString()}] Cron audience-snapshot error:`, err.message);
+  }
+}, { timezone: 'UTC' });
 
 // Scheduled-publish cron — every 5 minutes, promote any blog/guide whose
 // scheduled_for has arrived to status='published'. Runs against BOTH the

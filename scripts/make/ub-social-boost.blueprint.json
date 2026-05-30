@@ -1,0 +1,242 @@
+{
+  "_doc": "Make scenario 1 of 2 — ub-social-boost (webhook-driven boost creation). Per .ruflo/phase-g3-design.md §1.1. Op cost: ~8 ops per success run / ~4 ops per error run. Triggered by ContentBrain POSTing a signed boost_request to the webhook URL after a social post publishes successfully with meta.boost_eligible=true. Module flow: CustomWebHook -> HMAC-verify (Tools:Set) -> Router -> [success: FB Ads Create Campaign -> Create AdSet -> Create Ad -> Update Campaign status=ACTIVE -> HTTP callback] / [error: HTTP callback status=failed]. The HMAC secrets MAKE_WEBHOOK_SECRET (inbound verify) and MAKE_CALLBACK_SECRET (outbound sign) are resolved at runtime from the Make 'cb-secrets' Data Store (coder creates this during provisioning — see .ruflo/phase-g3-ops.md §3). FB ads modules use connection id 6444829 — refreshed manually by Simon with ads_management + ads_read scopes before activation (see .ruflo/phase-g3-ops.md §4).",
+  "_targetTeamId": 1406232,
+  "_fbConnectionId": 6444829,
+  "name": "ub-social-boost",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "version": 1,
+      "mapper": {},
+      "parameters": {
+        "hook": "__HOOK_PLACEHOLDER__",
+        "maxResults": 1
+      },
+      "metadata": {
+        "designer": { "x": 0, "y": 0 },
+        "restore": {
+          "parameters": {
+            "hook": {
+              "data": { "editable": "true" },
+              "label": "ub-social-boost webhook"
+            }
+          }
+        },
+        "parameters": [
+          { "name": "hook", "type": "hook:gateway-webhook", "label": "Webhook", "required": true },
+          { "name": "maxResults", "type": "number", "label": "Maximum number of results" }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "module": "util:SetVariables2",
+      "version": 1,
+      "mapper": {
+        "variables": [
+          {
+            "name": "expected_signature",
+            "value": "sha256={{sha256(toString(1.__IMTRAWBODY__); env.MAKE_WEBHOOK_SECRET; \"hex\")}}"
+          },
+          {
+            "name": "incoming_signature",
+            "value": "{{1.__IMTHEADERS__.`x-cb-signature`}}"
+          },
+          {
+            "name": "request_id",       "value": "{{1.request_id}}" },
+          { "name": "post_id",          "value": "{{1.post_id}}" },
+          { "name": "fb_post_id",       "value": "{{1.fb_post_id}}" },
+          { "name": "page_id",          "value": "{{1.page_id}}" },
+          { "name": "callback_url",     "value": "{{1.callback_url}}" },
+          { "name": "daily_budget_pence","value": "{{1.daily_budget_pence}}" },
+          { "name": "duration_hours",   "value": "{{1.duration_hours}}" },
+          { "name": "audience_spec",    "value": "{{1.audience_spec}}" }
+        ],
+        "scope": "roundtrip"
+      },
+      "metadata": { "designer": { "x": 300, "y": 0 } }
+    },
+    {
+      "id": 3,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "mapper": null,
+      "metadata": { "designer": { "x": 600, "y": 0 } },
+      "routes": [
+        {
+          "_doc": "Success branch — HMAC verified. Modules 4-8.",
+          "filter": {
+            "name": "signature-ok",
+            "conditions": [[
+              { "a": "{{2.expected_signature}}", "b": "{{2.incoming_signature}}", "o": "text:equal" }
+            ]]
+          },
+          "flow": [
+            {
+              "id": 4,
+              "module": "facebook-ads:createCampaign",
+              "version": 6,
+              "mapper": {
+                "__IMTCONN__": 6444829,
+                "name": "UB-boost-{{2.request_id}}",
+                "objective": "OUTCOME_ENGAGEMENT",
+                "special_ad_categories": [],
+                "buying_type": "AUCTION",
+                "status": "PAUSED"
+              },
+              "metadata": { "designer": { "x": 900, "y": -150 } }
+            },
+            {
+              "id": 5,
+              "module": "facebook-ads:createAdSet",
+              "version": 6,
+              "mapper": {
+                "__IMTCONN__": 6444829,
+                "campaign_id": "{{4.id}}",
+                "name": "UB-adset-{{2.request_id}}",
+                "daily_budget": "{{2.daily_budget_pence}}",
+                "billing_event": "IMPRESSIONS",
+                "optimization_goal": "POST_ENGAGEMENT",
+                "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+                "start_time": "{{now}}",
+                "end_time": "{{addHours(now; 2.duration_hours)}}",
+                "targeting": {
+                  "geo_locations": {
+                    "cities": "{{map(2.audience_spec.geo_locations_cities; \"value\")}}",
+                    "regions": "{{2.audience_spec.geo_locations_regions}}"
+                  },
+                  "age_min": "{{2.audience_spec.age_min}}",
+                  "age_max": "{{2.audience_spec.age_max}}",
+                  "interests": "{{2.audience_spec.interests}}",
+                  "publisher_platforms": "{{2.audience_spec.publisher_platforms}}"
+                },
+                "status": "ACTIVE"
+              },
+              "metadata": { "designer": { "x": 1200, "y": -150 } }
+            },
+            {
+              "id": 6,
+              "module": "facebook-ads:createAd",
+              "version": 6,
+              "mapper": {
+                "__IMTCONN__": 6444829,
+                "adset_id": "{{5.id}}",
+                "name": "UB-ad-{{2.request_id}}",
+                "creative": {
+                  "object_story_id": "{{2.fb_post_id}}"
+                },
+                "status": "ACTIVE"
+              },
+              "metadata": { "designer": { "x": 1500, "y": -150 } }
+            },
+            {
+              "id": 7,
+              "module": "facebook-ads:updateCampaign",
+              "version": 6,
+              "mapper": {
+                "__IMTCONN__": 6444829,
+                "campaign_id": "{{4.id}}",
+                "status": "ACTIVE"
+              },
+              "metadata": { "designer": { "x": 1800, "y": -150 } }
+            },
+            {
+              "id": 8,
+              "module": "http:ActionSendData",
+              "version": 3,
+              "mapper": {
+                "url": "{{2.callback_url}}",
+                "method": "POST",
+                "headers": [
+                  { "name": "content-type", "value": "application/json" },
+                  {
+                    "name": "x-make-signature",
+                    "value": "sha256={{sha256(toJSON({\"request_id\": 2.request_id, \"status\": \"active\", \"boost_campaign_id\": 4.id, \"boost_ad_id\": 6.id, \"started_at\": formatDate(now; \"YYYY-MM-DDTHH:mm:ssZ\"), \"error_message\": null, \"make_execution_id\": executionId}); env.MAKE_CALLBACK_SECRET; \"hex\")}}"
+                  }
+                ],
+                "qs": [],
+                "bodyType": "raw",
+                "contentType": "application/json",
+                "data": "{{toJSON({\"request_id\": 2.request_id, \"status\": \"active\", \"boost_campaign_id\": 4.id, \"boost_ad_id\": 6.id, \"started_at\": formatDate(now; \"YYYY-MM-DDTHH:mm:ssZ\"), \"error_message\": null, \"make_execution_id\": executionId})}}",
+                "parseResponse": true,
+                "shareCookies": false,
+                "followRedirect": true,
+                "useMtls": false,
+                "timeout": 40
+              },
+              "metadata": { "designer": { "x": 2100, "y": -150 } }
+            }
+          ]
+        },
+        {
+          "_doc": "Error branch — HMAC mismatch OR any FB API failure caught by Make's auto error route lands here via the default fallback route. POST status=failed to CB callback. Module 9.",
+          "filter": {
+            "name": "signature-fail-or-other",
+            "conditions": [[
+              { "a": "{{2.expected_signature}}", "b": "{{2.incoming_signature}}", "o": "text:notequal" }
+            ]]
+          },
+          "flow": [
+            {
+              "id": 9,
+              "module": "http:ActionSendData",
+              "version": 3,
+              "mapper": {
+                "url": "{{2.callback_url}}",
+                "method": "POST",
+                "headers": [
+                  { "name": "content-type", "value": "application/json" },
+                  {
+                    "name": "x-make-signature",
+                    "value": "sha256={{sha256(toJSON({\"request_id\": 2.request_id, \"status\": \"failed\", \"boost_campaign_id\": null, \"boost_ad_id\": null, \"started_at\": null, \"error_message\": \"HMAC verification failed or FB API rejected the boost\", \"make_execution_id\": executionId}); env.MAKE_CALLBACK_SECRET; \"hex\")}}"
+                  }
+                ],
+                "qs": [],
+                "bodyType": "raw",
+                "contentType": "application/json",
+                "data": "{{toJSON({\"request_id\": 2.request_id, \"status\": \"failed\", \"boost_campaign_id\": null, \"boost_ad_id\": null, \"started_at\": null, \"error_message\": \"HMAC verification failed or FB API rejected the boost\", \"make_execution_id\": executionId})}}",
+                "parseResponse": true,
+                "shareCookies": false,
+                "followRedirect": true,
+                "useMtls": false,
+                "timeout": 40
+              },
+              "metadata": { "designer": { "x": 900, "y": 150 } }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "instant": true,
+    "version": 1,
+    "scenario": {
+      "dlq": false,
+      "dataloss": false,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "roundtrips": 1,
+      "sequential": false,
+      "confidential": false,
+      "freshVariables": false,
+      "autoCommitTriggerLast": true
+    }
+  },
+  "scheduling": { "type": "immediately" },
+  "interface": {
+    "input": [
+      { "name": "request_id",          "type": "text", "label": "Boost run UUID (echoed back in callback)" },
+      { "name": "post_id",             "type": "text", "label": "Posts table UUID" },
+      { "name": "fb_post_id",          "type": "text", "label": "Facebook page-post id (page_id_post_id)" },
+      { "name": "page_id",             "type": "text", "label": "Facebook page id" },
+      { "name": "objective",           "type": "text", "label": "FB ad objective", "default": "OUTCOME_ENGAGEMENT" },
+      { "name": "daily_budget_pence",  "type": "number", "label": "Daily budget in pence (GBP minor units)" },
+      { "name": "duration_hours",      "type": "number", "label": "Boost duration hours", "default": 24 },
+      { "name": "audience_spec",       "type": "collection", "label": "FB Marketing API targeting spec (flat)" },
+      { "name": "callback_url",        "type": "url", "label": "ContentBrain callback URL" }
+    ],
+    "output": []
+  }
+}

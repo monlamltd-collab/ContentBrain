@@ -1,0 +1,160 @@
+{
+  "_doc": "Make scenario 2 of 2 — ub-social-boost-reconcile (daily metrics pull). Per .ruflo/phase-g3-design.md §1.2. Op cost: 4 + 2N per run where N = active boost_runs. At pilot avg N=2 -> 8 ops/day. At ramp avg N=5 -> 14 ops/day. Trigger: cron '0 6 * * *' UTC. Flow: HTTP GET /api/social-boost-active (signed) -> Iterator over runs -> FB Ads Get Insights per campaign -> flatten via SetVariables2 -> Array Aggregator -> single HTTP POST /api/social-boost-reconcile (signed). HMAC secrets resolved from Make 'cb-secrets' Data Store. FB connection id 6444829 same as scenario 1.",
+  "_targetTeamId": 1406232,
+  "_fbConnectionId": 6444829,
+  "name": "ub-social-boost-reconcile",
+  "flow": [
+    {
+      "id": 1,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "mapper": {
+        "url": "{{env.CB_BASE_URL}}/api/social-boost-active",
+        "method": "GET",
+        "headers": [
+          {
+            "name": "x-cb-signature",
+            "value": "sha256={{sha256(\"\"; env.MAKE_WEBHOOK_SECRET; \"hex\")}}"
+          }
+        ],
+        "qs": [],
+        "parseResponse": true,
+        "shareCookies": false,
+        "followRedirect": true,
+        "useMtls": false,
+        "timeout": 40
+      },
+      "metadata": { "designer": { "x": 0, "y": 0 } }
+    },
+    {
+      "id": 2,
+      "module": "builtin:BasicAggregator",
+      "version": 1,
+      "mapper": null,
+      "metadata": { "designer": { "x": 300, "y": 0 } },
+      "_doc": "Placeholder anchor — the real iterator is module 3 below; this module 2 is structural to follow Make's flow conventions. If the schema validator rejects, drop this module and renumber.",
+      "_skipIfRejected": true
+    },
+    {
+      "id": 3,
+      "module": "builtin:Iterator",
+      "version": 1,
+      "mapper": {
+        "array": "{{1.data.runs}}"
+      },
+      "metadata": { "designer": { "x": 600, "y": 0 } }
+    },
+    {
+      "id": 4,
+      "module": "facebook-ads:getInsights",
+      "version": 6,
+      "mapper": {
+        "__IMTCONN__": 6444829,
+        "level": "campaign",
+        "object_id": "{{3.boost_campaign_id}}",
+        "fields": ["spend", "impressions", "reach", "actions", "unique_actions", "inline_link_clicks"],
+        "time_range": {
+          "since": "{{formatDate(3.started_at; \"YYYY-MM-DD\")}}",
+          "until": "{{formatDate(now; \"YYYY-MM-DD\")}}"
+        }
+      },
+      "metadata": { "designer": { "x": 900, "y": 0 } }
+    },
+    {
+      "id": 5,
+      "module": "util:SetVariables2",
+      "version": 1,
+      "mapper": {
+        "variables": [
+          { "name": "request_id",          "value": "{{3.request_id}}" },
+          { "name": "boost_campaign_id",   "value": "{{3.boost_campaign_id}}" },
+          { "name": "spend_pence",         "value": "{{round(4.spend * 100)}}" },
+          { "name": "ad_impressions",      "value": "{{4.impressions}}" },
+          {
+            "name": "ad_engagements",
+            "value": "{{ifempty(get(filter(4.actions; \"action_type\"; \"post_engagement\")[]; \"value\"); 0)}}"
+          },
+          {
+            "name": "ad_new_follows",
+            "value": "{{ifempty(get(filter(4.actions; \"action_type\"; \"page_engagement\")[]; \"value\"); 0)}}"
+          },
+          { "name": "ad_link_clicks",      "value": "{{ifempty(4.inline_link_clicks; 0)}}" },
+          { "name": "raw_metrics",         "value": "{{4}}" },
+          {
+            "name": "is_final",
+            "value": "{{if(now >= addHours(parseDate(3.started_at; \"YYYY-MM-DDTHH:mm:ssZ\"); 3.duration_hours); true; false)}}"
+          }
+        ],
+        "scope": "roundtrip"
+      },
+      "metadata": { "designer": { "x": 1200, "y": 0 } }
+    },
+    {
+      "id": 6,
+      "module": "builtin:ArrayAggregator",
+      "version": 1,
+      "mapper": {
+        "feeder": 3,
+        "target": "object",
+        "structure": [
+          { "name": "request_id",        "value": "{{5.request_id}}" },
+          { "name": "boost_campaign_id", "value": "{{5.boost_campaign_id}}" },
+          { "name": "spend_pence",       "value": "{{5.spend_pence}}" },
+          { "name": "ad_impressions",    "value": "{{5.ad_impressions}}" },
+          { "name": "ad_engagements",    "value": "{{5.ad_engagements}}" },
+          { "name": "ad_new_follows",    "value": "{{5.ad_new_follows}}" },
+          { "name": "ad_link_clicks",    "value": "{{5.ad_link_clicks}}" },
+          { "name": "is_final",          "value": "{{5.is_final}}" },
+          { "name": "raw_metrics",       "value": "{{5.raw_metrics}}" }
+        ]
+      },
+      "metadata": { "designer": { "x": 1500, "y": 0 } }
+    },
+    {
+      "id": 7,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "mapper": {
+        "url": "{{env.CB_BASE_URL}}/api/social-boost-reconcile",
+        "method": "POST",
+        "headers": [
+          { "name": "content-type", "value": "application/json" },
+          {
+            "name": "x-make-signature",
+            "value": "sha256={{sha256(toJSON({\"as_of\": formatDate(now; \"YYYY-MM-DDTHH:mm:ssZ\"), \"metrics\": 6.array}); env.MAKE_CALLBACK_SECRET; \"hex\")}}"
+          }
+        ],
+        "qs": [],
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "data": "{{toJSON({\"as_of\": formatDate(now; \"YYYY-MM-DDTHH:mm:ssZ\"), \"metrics\": 6.array})}}",
+        "parseResponse": true,
+        "shareCookies": false,
+        "followRedirect": true,
+        "useMtls": false,
+        "timeout": 40
+      },
+      "metadata": { "designer": { "x": 1800, "y": 0 } }
+    }
+  ],
+  "metadata": {
+    "version": 1,
+    "scenario": {
+      "dlq": false,
+      "dataloss": false,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "roundtrips": 1,
+      "sequential": false,
+      "confidential": false,
+      "freshVariables": false,
+      "autoCommitTriggerLast": true
+    }
+  },
+  "scheduling": {
+    "type": "cron",
+    "cron": "0 6 * * *",
+    "_doc": "06:00 UTC daily. Strictly before the 09:00 UK publish cron so dashboard rows align same-day."
+  },
+  "interface": { "input": [], "output": [] }
+}

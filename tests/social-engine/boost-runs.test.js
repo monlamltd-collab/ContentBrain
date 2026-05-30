@@ -17,6 +17,7 @@ const HELPERS_PATH = require.resolve('../../lib/social-engine/helpers');
 
 let insertCalls = [];
 let insertResponse = null;
+let activeBoostRunsResponse = [];
 
 function loadBoostFresh() {
   delete require.cache[BOOST_PATH];
@@ -30,6 +31,8 @@ function loadBoostFresh() {
         insertCalls.push(row);
         return insertResponse || { id: 'boost-1', ...row, status: 'pending' };
       },
+      getActiveBoostRunsForPost: async () => activeBoostRunsResponse,
+      markBoostFailed: async (id, msg) => ({ id, status: 'failed', meta: { error: msg } }),
     },
   };
   return require('../../lib/social-engine/boost');
@@ -38,6 +41,7 @@ function loadBoostFresh() {
 beforeEach(() => {
   insertCalls = [];
   insertResponse = null;
+  activeBoostRunsResponse = [];
   delete process.env.MAKE_BOOST_WEBHOOK_URL;
 });
 
@@ -133,14 +137,6 @@ test('requestBoost: MAKE_BOOST_WEBHOOK_URL unset → fired_webhook=false', async
   assert.equal(r.fired_webhook, false);
 });
 
-test('requestBoost: MAKE_BOOST_WEBHOOK_URL set → still false in PR2 (webhook leg deferred)', async () => {
-  process.env.MAKE_BOOST_WEBHOOK_URL = 'https://hooks.eu1.make.com/test';
-  const { requestBoost } = loadBoostFresh();
-  const r = await requestBoost({ id: 'p-4', meta: { niche_tag: 'wales' } }, 'fb-4');
-  // PR2 stub — even with env set, fired_webhook stays false. PR3 flips this.
-  assert.equal(r.fired_webhook, false);
-});
-
 test('requestBoost throws if insertBoostRun throws', async () => {
   delete require.cache[BOOST_PATH];
   delete require.cache[HELPERS_PATH];
@@ -150,6 +146,8 @@ test('requestBoost throws if insertBoostRun throws', async () => {
     loaded: true,
     exports: {
       insertBoostRun: async () => { throw new Error('FK violation'); },
+      getActiveBoostRunsForPost: async () => [],
+      markBoostFailed: async () => ({}),
     },
   };
   const { requestBoost } = require('../../lib/social-engine/boost');
