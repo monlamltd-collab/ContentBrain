@@ -1365,6 +1365,23 @@ cron.schedule('30 6 * * *', async () => {
   }
 }, { timezone: 'UTC' });
 
+// Phase G-4 — nightly breakout learner. 08:00 UTC = after Make reconcile
+// (06:00) + audience snapshot (06:30) and before the 09:00 BST publish
+// cron, so isBreakoutActive() / getBreakoutTags() pick up today's fresh
+// signal. See .ruflo/phase-g4-design.md §1.7.
+cron.schedule('0 8 * * *', async () => {
+  try {
+    const { runBreakoutLearner } = require('./lib/social-engine/learner');
+    const result = await runBreakoutLearner();
+    console.log(`[${new Date().toISOString()}] Breakout learner: ${JSON.stringify(result)}`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Breakout learner error:`, err.message);
+    try {
+      await sendNotification(`<b>Breakout learner cron failed:</b> ${err.message.slice(0, 200)}`);
+    } catch (_) { /* Telegram outage must not cascade */ }
+  }
+}, { timezone: 'UTC' });
+
 // Scheduled-publish cron — every 5 minutes, promote any blog/guide whose
 // scheduled_for has arrived to status='published'. Runs against BOTH the
 // primary Supabase project AND the optional bridgematch project so that
