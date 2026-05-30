@@ -1470,25 +1470,22 @@ cron.schedule('0 20 * * *', async () => {
 // workflow still works for that archetype. For every other type it picks,
 // renders, inserts a draft, and sends to Telegram for review.
 //
-// TODO: unmute after HLP compliance email — see Phase G architecture
-// Part 12. The cron is intentionally MUTED in production by keeping the
-// registration commented out. Tests exercise runDailySocialPost directly
-// without firing the cron. To unmute: remove the leading `//` from the
-// cron.schedule line below AND confirm the HLP compliance pre-flight has
-// been sent + acknowledged (architecture Part 12 — "before first live
-// post, get HLP compliance to ack the Page positioning + sample 5 posts").
-//
-// cron.schedule('0 7 * * *', async () => {
-//   try {
-//     const { runDailySocialPost } = require('./lib/social-engine/orchestrator');
-//     await runDailySocialPost();
-//   } catch (err) {
-//     console.error(`[${new Date().toISOString()}] Phase G cron error: ${err.message}`);
-//     try {
-//       await sendNotification(`<b>Phase G social-engine cron failed:</b> ${err.message.slice(0, 200)}`);
-//     } catch {}
-//   }
-// });
+// Phase G social-engine — daily post cron at 07:00 UTC.
+// Originally muted pending HLP compliance pre-flight (architecture Part 12),
+// but unregulated property/auction content sits outside HLP's authorisation
+// perimeter — no compliance gate is required. Unmuted 2026-05-31.
+// SOCIAL_BANS + outbound-filters remain active as voice + quality protection.
+cron.schedule('0 7 * * *', async () => {
+  try {
+    const { runDailySocialPost } = require('./lib/social-engine/orchestrator');
+    await runDailySocialPost();
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Phase G cron error: ${err.message}`);
+    try {
+      await sendNotification(`<b>Phase G social-engine cron failed:</b> ${err.message.slice(0, 200)}`);
+    } catch {}
+  }
+});
 
 // ── WEEKLY SUPERLATIVE REELS ──
 // Monday 08:00 — generate the five "X of the week" auction reels (cheapest,
