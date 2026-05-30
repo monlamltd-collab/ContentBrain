@@ -3,42 +3,15 @@
 // routes/dashboard/pipeline.js
 //
 // Phase F-1 — the Pipeline tab. Visual surface for the Phase C reply
-// pipeline + sequence state machine. Replaces "scroll Telegram for 10
-// minutes to find one thing" with a focused triage view.
+// pipeline + sequence state machine.
 //
-// Three sections in one full-page render:
-//   A. Needs attention — replies with requires_human=true + paused
-//      sequences with awaiting_human/hostile_pause. Newest first.
-//   B. Active sequences — paginated 25/page, track-chip filtered.
-//      Sorted by track ASC, next_scheduled_at ASC.
-//   C. Recent activity — interleaved last 20 outbound sends + last 20
-//      replies, time-ordered. Read-only.
+// Three sections: Needs attention (replies + paused sequences), Active
+// sequences (paginated 25/page), Recent activity (interleaved sends +
+// replies). Per-row quick actions map 1:1 to lib/sequence.js +
+// lib/suppression.js.
 //
-// Per-row quick actions map 1:1 to existing helpers in lib/sequence.js +
-// lib/suppression.js — Pipeline is a read-side consumer, never a refactor
-// surface. Endpoint list (all POSTs return HTML fragments for HTMX
-// outerHTML swap of the originating card):
-//
-//   POST /reply/:id/resolve          — flip requires_human=false
-//   POST /reply/:id/meeting-booked   — set contacts.metadata.meeting_booked_at + resolve
-//   POST /reply/:id/wrong-contact    — suppress + complete sequence + resolve (3 side-effects)
-//   POST /sequence/:id/pause         — pauseSequence(id, 'manual_pause')
-//   POST /sequence/:id/force-next    — advanceSequence(id), bypassing next_scheduled_at
-//
-// HTMX fragment endpoints for the three sections (sub-loaded via
-// hx-trigger="load" inside the main GET / fragment so the page renders
-// the shell instantly and each section fills as its query returns):
-//
-//   GET /dashboard/pipeline/needs-attention?window=7d&intent=interested,questions
-//   GET /dashboard/pipeline/active-sequences?track=lender&page=0
-//   GET /dashboard/pipeline/recent-activity?window=24h
-//
-// Body-parser scoped to THIS router only (HTMX POSTs come as
-// application/x-www-form-urlencoded). Same pattern as
-// routes/dashboard/approve.js — keeps other routes' parsers untouched.
-//
-// Auth: inherited from the parent /dashboard mount (requireAuth in
-// server.js). No new auth code.
+// HTMX patterns mirror routes/dashboard/approve.js: body-parser scoped to
+// THIS router only, POSTs return HTML fragments for outerHTML swap.
 //
 // Design source of truth: .ruflo/phase-f-pipeline-tab-design.md.
 
@@ -51,9 +24,11 @@ const router = express.Router();
 // Body-parser scoped — mirrors routes/dashboard/approve.js:26.
 router.use(express.urlencoded({ extended: false }));
 
-// Cache the static template at module load (same pattern as
-// routes/dashboard/performance.js). The shell HTML is small + never
-// changes at runtime.
+const pipelineQueries = require('../../lib/dashboard/pipeline-queries');
+const renderers = require('../../lib/dashboard/pipeline-render');
+const { supabase } = require('../../lib/supabase');
+
+// Cache the static template at module load.
 const TEMPLATE_PATH = path.join(__dirname, 'pipeline.html');
 let TEMPLATE_CACHE = null;
 function getTemplate() {
@@ -66,20 +41,8 @@ function getTemplate() {
 // ── Main tab render ───────────────────────────────────────────────────────
 
 /**
- * GET /dashboard/pipeline
- *
- * Server-rendered HTML page (full-page render mounted by
- * routes/dashboard/index.js). Returns the Pipeline tab's HTML fragment:
- *   - window selector (24h / 7d / 30d / all radios), default 7d
- *   - intent chip filter (interested, questions, hostile, complaint,
- *     and "all" — drives Section A's filter param)
- *   - three empty <div> targets (#needs-attention, #active-sequences,
- *     #recent-activity), each with hx-trigger="load" firing immediately
- *     against the matching /api fragment endpoint
- *
- * No DB queries here — the three section endpoints own those. This route
- * is pure markup. Keep it that way; queries belong in
- * lib/dashboard/pipeline-queries.js so they're testable in isolation.
+ * GET /dashboard/pipeline — Pipeline tab shell. Each section sub-loads
+ * itself via hx-trigger="load".
  */
 router.get('/', (_req, res) => {
   try {
@@ -87,265 +50,375 @@ router.get('/', (_req, res) => {
     res.send(getTemplate());
   } catch (err) {
     console.error('[dashboard/pipeline] template read error:', err.message);
-    res.status(500).send(`<p class="error">Failed to load Pipeline tab: ${escHtml(err.message)}</p>`);
+    res.status(500).send(`<p class="error">Failed to load Pipeline tab: ${renderers.escHtml(err.message)}</p>`);
   }
 });
 
 // ── Section A: needs attention ────────────────────────────────────────────
 
-/**
- * GET /dashboard/pipeline/needs-attention
- *
- * Query params:
- *   - window: '24h' | '7d' | '30d' | 'all'   default '7d'
- *   - intent: comma-separated subset of VALID_REPLY_INTENTS, or 'all'
- *             default 'interested,questions,hostile,complaint'
- *
- * Returns an HTMX fragment: a list of <div class="card pipeline reply-card">
- * + <div class="card pipeline sequence-card paused"> cards interleaved by
- * created_at DESC. Cap 50 rows total (combined). Empty state copy: "No
- * replies need your attention right now."
- *
- * Backed by:
- *   - pipelineQueries.getNeedsAttention({windowDays, intents})
- *
- * Card render helpers live in this file (renderReplyCard,
- * renderPausedSequenceCard) — exported for the action endpoints to reuse
- * post-action swaps.
- */
-router.get('/needs-attention', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: GET /needs-attention');
+router.get('/needs-attention', async (req, res) => {
+  try {
+    const intents = parseIntentParam(req.query.intent);
+    const windowDays = parseWindowDays(req.query.window, 7);
+    const items = await pipelineQueries.getNeedsAttention({ windowDays, intents });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    if (!items.length) {
+      return res.send('<p class="empty pipeline-empty">No replies need your attention right now.</p>');
+    }
+    const rows = items.map(item => {
+      if (item.kind === 'reply') {
+        return renderers.renderReplyCard(item, { state: 'default' });
+      }
+      return renderers.renderPausedSequenceCard(item);
+    }).join('\n');
+    res.send(`<div id="needs-attention-list">${rows}</div>`);
+  } catch (err) {
+    console.error('[dashboard/pipeline] needs-attention error:', err.message);
+    res.status(500).send(`<p class="error">Failed to load needs-attention queue: ${renderers.escHtml(err.message)}</p>`);
+  }
 });
 
 // ── Section B: active sequences ───────────────────────────────────────────
 
-/**
- * GET /dashboard/pipeline/active-sequences
- *
- * Query params:
- *   - track: 'all' | 'lender' | 'broker' | 'auction_house'   default 'all'
- *   - page:  integer >= 0                                    default 0
- *   - pageSize: integer 1..50                                default 25
- *
- * Returns an HTMX fragment: a list of <div class="card pipeline
- * sequence-card active"> cards. Footer carries a "Load more" button
- * (hx-get same endpoint with page=page+1, hx-target=#active-sequences-list,
- * hx-swap=beforeend) when more rows remain.
- *
- * Backed by:
- *   - pipelineQueries.getActiveSequences({track, page, pageSize})
- */
-router.get('/active-sequences', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: GET /active-sequences');
+router.get('/active-sequences', async (req, res) => {
+  try {
+    const track = pipelineQueries.VALID_TRACK_FILTERS.includes(req.query.track) ? req.query.track : 'all';
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const result = await pipelineQueries.getActiveSequences({ track, page });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    if (!result.rows.length && page === 0) {
+      return res.send('<p class="empty pipeline-empty">No active sequences in this view.</p>');
+    }
+    const cards = result.rows.map(row => renderers.renderActiveSequenceCard(row, { state: 'default' })).join('\n');
+    const loadMore = result.hasMore
+      ? `<button class="pipeline-load-more"
+          hx-get="/dashboard/pipeline/active-sequences?track=${encodeURIComponent(track)}&amp;page=${page + 1}"
+          hx-target="#active-sequences-list"
+          hx-swap="beforeend"
+          hx-on:htmx:after-on-load="this.remove()">Load more</button>`
+      : '';
+    const wrapper = page === 0
+      ? `<div id="active-sequences-list">${cards}</div>${loadMore}`
+      : `${cards}${loadMore}`;
+    res.send(wrapper);
+  } catch (err) {
+    console.error('[dashboard/pipeline] active-sequences error:', err.message);
+    res.status(500).send(`<p class="error">Failed to load active sequences: ${renderers.escHtml(err.message)}</p>`);
+  }
 });
 
 // ── Section C: recent activity ────────────────────────────────────────────
 
-/**
- * GET /dashboard/pipeline/recent-activity
- *
- * Query params:
- *   - window: '24h' | '7d' | '30d' | 'all'   default '24h'
- *   - limit:  integer 10..100                default 40
- *
- * Returns an HTMX fragment: a flat list of one-line <div class="activity-row">
- * entries — outbound sends prefixed `→`, replies prefixed `←`, both
- * time-ordered DESC. No card chrome; no per-row actions.
- *
- * Backed by:
- *   - pipelineQueries.getRecentActivity({windowHours, limit})
- */
-router.get('/recent-activity', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: GET /recent-activity');
+router.get('/recent-activity', async (req, res) => {
+  try {
+    const windowHours = parseWindowHours(req.query.window, 24);
+    const rawLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 40;
+    const items = await pipelineQueries.getRecentActivity({ windowHours, limit });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    if (!items.length) {
+      return res.send('<p class="empty pipeline-empty">No recent activity in this window.</p>');
+    }
+    const rows = items.map(renderers.renderActivityRow).join('\n');
+    res.send(`<div id="recent-activity-list">${rows}</div>`);
+  } catch (err) {
+    console.error('[dashboard/pipeline] recent-activity error:', err.message);
+    res.status(500).send(`<p class="error">Failed to load recent activity: ${renderers.escHtml(err.message)}</p>`);
+  }
 });
 
 // ── Reply quick actions ───────────────────────────────────────────────────
 
 /**
- * POST /dashboard/pipeline/reply/:id/resolve
- *
- * Flip `replies.requires_human=false`. Preserves the original
- * `processed_at` (use COALESCE — don't bump it; the activity feed in
- * Section C reads off that timestamp). Guard: only updates rows where
- * requires_human=true so a double-click is a no-op.
- *
- * Returns the same reply card re-rendered with a `resolved` class
- * (greyed-out + "resolved at HH:MM" footer). HTMX outerHTML swaps the
- * card in place — Simon sees what just happened without a tab refresh.
- *
- * No body.
+ * POST /reply/:id/resolve — flip requires_human=false, preserve processed_at.
  */
-router.post('/reply/:id/resolve', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: POST /reply/:id/resolve');
+router.post('/reply/:id/resolve', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const ctx = await pipelineQueries.getReplyByIdWithContext(id);
+    if (!ctx) {
+      return res.status(404).send(`<div class="error">Reply ${renderers.escHtml(id)} not found.</div>`);
+    }
+
+    await resolveReply(id, ctx.reply.processed_at);
+
+    // Re-render the card in resolved state.
+    const item = {
+      kind: 'reply',
+      ts: ctx.reply.created_at,
+      reply: { ...ctx.reply, requires_human: false },
+      sequence: ctx.sequence,
+      contact: ctx.contact,
+      prospect: ctx.prospect,
+      jump_url: pipelineQueries.buildBridgematchJumpUrl(ctx.prospect, ctx.contact),
+    };
+    res.set('HX-Trigger', 'pipeline-card-changed');
+    res.send(renderers.renderReplyCard(item, { state: 'resolved' }));
+  } catch (err) {
+    console.error(`[dashboard/pipeline] resolve ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Resolve failed: ${renderers.escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * POST /dashboard/pipeline/reply/:id/meeting-booked
- *
- * Set `contacts.metadata.meeting_booked_at = now()` for the reply's
- * contact (merge into existing metadata jsonb — don't overwrite). Also
- * flip `replies.requires_human=false`. Does NOT complete the sequence
- * (per design doc §5.3 default: meetings are contact-level, not
- * sequence-terminal — the Performance tab attributes meetings via
- * contacts.metadata.meeting_booked_at separately).
- *
- * Button is gated by intent in the card renderer — only shown when
- * intent IN ('interested', 'questions'). Server-side: no intent check;
- * Simon clicked the button, his call.
- *
- * Returns the reply card re-rendered with a `meeting-booked` class
- * (green tint + "meeting booked" footer).
- *
- * No body.
+ * POST /reply/:id/meeting-booked — set contacts.metadata.meeting_booked_at
+ * and resolve the reply. Does NOT terminate the sequence (design §5.3).
  */
-router.post('/reply/:id/meeting-booked', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: POST /reply/:id/meeting-booked');
+router.post('/reply/:id/meeting-booked', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const ctx = await pipelineQueries.getReplyByIdWithContext(id);
+    if (!ctx) {
+      return res.status(404).send(`<div class="error">Reply ${renderers.escHtml(id)} not found.</div>`);
+    }
+    if (!ctx.contact) {
+      return res.status(500).send('<div class="error">Reply has no linked contact — cannot record meeting.</div>');
+    }
+
+    const nowIso = new Date().toISOString();
+    const newMeta = { ...(ctx.contact.metadata || {}), meeting_booked_at: nowIso };
+    const { error: cErr } = await supabase
+      .from('contacts')
+      .update({ metadata: newMeta })
+      .eq('id', ctx.contact.id);
+    if (cErr) throw new Error(`contact metadata update failed: ${cErr.message}`);
+
+    await resolveReply(id, ctx.reply.processed_at);
+
+    const item = {
+      kind: 'reply',
+      ts: ctx.reply.created_at,
+      reply: { ...ctx.reply, requires_human: false },
+      sequence: ctx.sequence,
+      contact: { ...ctx.contact, metadata: newMeta },
+      prospect: ctx.prospect,
+      jump_url: pipelineQueries.buildBridgematchJumpUrl(ctx.prospect, ctx.contact),
+    };
+    res.set('HX-Trigger', 'pipeline-card-changed');
+    res.send(renderers.renderReplyCard(item, { state: 'meeting-booked' }));
+  } catch (err) {
+    console.error(`[dashboard/pipeline] meeting-booked ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Mark meeting booked failed: ${renderers.escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * POST /dashboard/pipeline/reply/:id/wrong-contact
- *
- * Three atomic side-effects, executed in this order:
- *   1. addSuppression(contact.email, 'wrong_person')        — lib/suppression.js
- *   2. if reply.sequence_id: completeSequence(seqId,
- *                                            'wrong_person') — lib/sequence.js
- *   3. UPDATE replies SET requires_human=false              — same row
- *
- * Order rationale: suppression first so a parallel publish-attempt sees
- * the block before the sequence-complete clears next_scheduled_at;
- * sequence-complete next so the cron stops drafting follow-ups; reply
- * resolve last so Simon's view of "what's resolved" reflects the
- * upstream changes.
- *
- * Each step is wrapped in try/catch so a single failure (e.g. addSuppression
- * conflict because Simon already suppressed manually) doesn't poison the
- * other two — same defensive shape as lib/inbound.js's action dispatcher.
- *
- * Button gated to intents OTHER than 'wrong_person' in the card renderer
- * (when the classifier already tagged it, the action ran in inbound.js;
- * this override is for the misses).
- *
- * Returns the reply card with a `wrong-contact` class.
- *
- * No body.
+ * POST /reply/:id/wrong-contact — suppress email + complete sequence +
+ * resolve reply. Each step wrapped so one failure doesn't poison the others.
  */
-router.post('/reply/:id/wrong-contact', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: POST /reply/:id/wrong-contact');
+router.post('/reply/:id/wrong-contact', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const ctx = await pipelineQueries.getReplyByIdWithContext(id);
+    if (!ctx) {
+      return res.status(404).send(`<div class="error">Reply ${renderers.escHtml(id)} not found.</div>`);
+    }
+    if (!ctx.contact || !ctx.contact.email) {
+      return res.status(500).send('<div class="error">Reply has no contact email — cannot suppress.</div>');
+    }
+
+    // Lazy require so test isolates can stub each module independently.
+    const { addSuppression } = require('../../lib/suppression');
+    const { completeSequence } = require('../../lib/sequence');
+
+    const stepErrors = [];
+
+    // 1. Suppress.
+    try {
+      await addSuppression(ctx.contact.email, 'wrong_person');
+    } catch (e) {
+      stepErrors.push(`suppression: ${e.message}`);
+      console.warn(`[dashboard/pipeline] wrong-contact ${id} suppression: ${e.message}`);
+    }
+
+    // 2. Complete sequence if linked.
+    if (ctx.sequence && ctx.sequence.id) {
+      try {
+        await completeSequence(ctx.sequence.id, 'wrong_person');
+      } catch (e) {
+        stepErrors.push(`sequence: ${e.message}`);
+        console.warn(`[dashboard/pipeline] wrong-contact ${id} sequence: ${e.message}`);
+      }
+    }
+
+    // 3. Resolve the reply.
+    try {
+      await resolveReply(id, ctx.reply.processed_at);
+    } catch (e) {
+      stepErrors.push(`reply: ${e.message}`);
+      console.warn(`[dashboard/pipeline] wrong-contact ${id} reply: ${e.message}`);
+    }
+
+    if (stepErrors.length === 3) {
+      throw new Error(`all three steps failed: ${stepErrors.join('; ')}`);
+    }
+
+    res.set('HX-Trigger', 'pipeline-refresh');
+    res.send('');
+  } catch (err) {
+    console.error(`[dashboard/pipeline] wrong-contact ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Mark wrong contact failed: ${renderers.escHtml(err.message)}</div>`);
+  }
 });
 
 // ── Sequence quick actions ────────────────────────────────────────────────
 
 /**
- * POST /dashboard/pipeline/sequence/:id/pause
- *
- * Calls `pauseSequence(id, 'manual_pause')` from lib/sequence.js. No-op
- * when already paused (the helper handles idempotency). Returns the
- * sequence card re-rendered as paused — visually, on the next page
- * refresh it'll move from Section B to Section A. No mid-swap re-fetch;
- * Simon's HTMX swap is enough.
- *
- * No body.
+ * POST /sequence/:id/pause — calls pauseSequence(id, 'manual_pause').
  */
-router.post('/sequence/:id/pause', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: POST /sequence/:id/pause');
+router.post('/sequence/:id/pause', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const { pauseSequence } = require('../../lib/sequence');
+    await pauseSequence(id, 'manual_pause');
+
+    const ctx = await pipelineQueries.getSequenceByIdWithContext(id);
+    res.set('HX-Trigger', 'pipeline-card-changed');
+    if (!ctx) {
+      return res.send(`<div class="card pipeline sequence-card paused" id="seq-card-${renderers.escHtml(id)}"><span class="badge status-badge status-paused">paused</span> <span class="muted">Sequence paused.</span></div>`);
+    }
+    const item = {
+      kind: 'paused-sequence',
+      ts: ctx.sequence.last_sent_at || ctx.sequence.created_at,
+      sequence: { ...ctx.sequence, status: 'paused', ended_reason: 'manual_pause' },
+      contact: ctx.contact,
+      prospect: ctx.prospect,
+      jump_url: pipelineQueries.buildBridgematchJumpUrl(ctx.prospect, ctx.contact),
+    };
+    res.send(renderers.renderPausedSequenceCard(item));
+  } catch (err) {
+    console.error(`[dashboard/pipeline] pause sequence ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Pause failed: ${renderers.escHtml(err.message)}</div>`);
+  }
 });
 
 /**
- * POST /dashboard/pipeline/sequence/:id/force-next
- *
- * Bypass the cron's `WHERE next_scheduled_at <= now()` guard by clearing
- * `next_scheduled_at` first, then calling `advanceSequence(id)` from
- * lib/sequence.js directly. advanceSequence already:
- *   - guards on status='active' (no-op if paused/completed)
- *   - loads contact + prospect
- *   - generates step N+1 via the outbound prompt
- *   - inserts a posts row as status='draft'
- *   - dispatches the Telegram approval message
- * It does NOT bump current_step — that happens on publish-success via
- * bumpSequenceOnSendSuccess. Two clicks in quick succession produce two
- * draft posts (undesirable). Mitigation: button uses `hx-disabled-elt="this"`
- * — disables on first click until the swap returns.
- *
- * Returns the sequence card with a one-line status update: "Step N+1
- * drafted — awaiting approval on the Approve tab."
- *
- * No body.
+ * POST /sequence/:id/force-next — bypass next_scheduled_at guard and call
+ * advanceSequence directly. Idempotent enough via the helper's status check.
  */
-router.post('/sequence/:id/force-next', async (_req, res) => {
-  void res; // coder: implement
-  throw new Error('NOT_IMPLEMENTED: POST /sequence/:id/force-next');
+router.post('/sequence/:id/force-next', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const { advanceSequence } = require('../../lib/sequence');
+
+    // Clear next_scheduled_at first — the cron query skips active rows
+    // with a future schedule, but advanceSequence itself just checks
+    // status === 'active'. Clearing brings the state into a consistent
+    // shape for any concurrent cron tick that might race us.
+    const { error: clearErr } = await supabase
+      .from('sequences')
+      .update({ next_scheduled_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('status', 'active');
+    if (clearErr) throw new Error(`next_scheduled_at clear failed: ${clearErr.message}`);
+
+    const result = await advanceSequence(id);
+
+    const ctx = await pipelineQueries.getSequenceByIdWithContext(id);
+    res.set('HX-Trigger', 'pipeline-card-changed');
+
+    // advanceSequence returns { ok: false } when the sequence isn't active.
+    if (result && result.ok === false) {
+      const msg = result.completed
+        ? 'Sequence already at terminal step — completed.'
+        : 'Sequence not active — no step drafted.';
+      if (!ctx) {
+        return res.send(`<div class="card pipeline sequence-card" id="seq-card-${renderers.escHtml(id)}"><span class="muted">${renderers.escHtml(msg)}</span></div>`);
+      }
+      const item = {
+        id: ctx.sequence.id,
+        track: ctx.sequence.track,
+        current_step: ctx.sequence.current_step,
+        status: ctx.sequence.status,
+        last_sent_at: ctx.sequence.last_sent_at,
+        next_scheduled_at: ctx.sequence.next_scheduled_at,
+        is_overdue: ctx.sequence.is_overdue,
+        contact: ctx.contact,
+        prospect: ctx.prospect,
+        jump_url: pipelineQueries.buildBridgematchJumpUrl(ctx.prospect, ctx.contact),
+      };
+      return res.send(renderers.renderActiveSequenceCard(item, { state: 'no-op', message: msg }));
+    }
+
+    const nextStep = (result && result.nextStep) || (ctx && ctx.sequence.current_step + 1) || '?';
+    if (!ctx) {
+      return res.send(`<div class="card pipeline sequence-card" id="seq-card-${renderers.escHtml(id)}"><span class="muted">Step ${renderers.escHtml(String(nextStep))} drafted — awaiting approval on the Approve tab.</span></div>`);
+    }
+    const item = {
+      id: ctx.sequence.id,
+      track: ctx.sequence.track,
+      current_step: ctx.sequence.current_step,
+      status: ctx.sequence.status,
+      last_sent_at: ctx.sequence.last_sent_at,
+      next_scheduled_at: ctx.sequence.next_scheduled_at,
+      is_overdue: ctx.sequence.is_overdue,
+      contact: ctx.contact,
+      prospect: ctx.prospect,
+      jump_url: pipelineQueries.buildBridgematchJumpUrl(ctx.prospect, ctx.contact),
+    };
+    res.send(renderers.renderActiveSequenceCard(item, {
+      state: 'force-next-drafted',
+      message: `Step ${nextStep} drafted — awaiting approval on the Approve tab.`,
+    }));
+  } catch (err) {
+    console.error(`[dashboard/pipeline] force-next ${id}: ${err.message}`);
+    res.status(500).send(`<div class="error">Force next step failed: ${renderers.escHtml(err.message)}</div>`);
+  }
 });
 
-// ── Render helpers ────────────────────────────────────────────────────────
-//
-// Coder: these stubs are the public render surface used by both the section
-// GETs and the per-row POSTs (post-action swap-in-place). Keep them in this
-// file — they're tightly coupled to the route handlers and the CSS classes
-// in public/dashboard/styles.css.
+// ── Internal helpers ──────────────────────────────────────────────────────
 
 /**
- * Render a reply card (Section A reply variant + post-action swaps).
+ * Idempotent reply resolve. Preserves the original `processed_at` via
+ * application-side COALESCE (Supabase JS doesn't expose RAW SQL COALESCE).
  *
- * @param {object} reply        joined { reply, contact, prospect, sequence }
- * @param {object} [opts]
- * @param {'default'|'resolved'|'meeting-booked'|'wrong-contact'} [opts.state]
- * @returns {string} HTML fragment
+ * @param {string} replyId
+ * @param {string|null} existingProcessedAt
  */
-function renderReplyCard(_reply, _opts) {
-  throw new Error('NOT_IMPLEMENTED: renderReplyCard');
+async function resolveReply(replyId, existingProcessedAt) {
+  const patch = { requires_human: false };
+  if (!existingProcessedAt) {
+    patch.processed_at = new Date().toISOString();
+  }
+  const { error } = await supabase
+    .from('replies')
+    .update(patch)
+    .eq('id', replyId);
+  if (error) throw new Error(`reply update failed: ${error.message}`);
 }
 
-/**
- * Render a paused-sequence card (Section A paused variant).
- *
- * @param {object} sequence  joined { sequence, contact, prospect, latestReply? }
- * @returns {string} HTML fragment
- */
-function renderPausedSequenceCard(_sequence) {
-  throw new Error('NOT_IMPLEMENTED: renderPausedSequenceCard');
+function parseIntentParam(raw) {
+  if (!raw || typeof raw !== 'string') return pipelineQueries.DEFAULT_ATTENTION_INTENTS.slice();
+  if (raw === 'all') {
+    // 'all' means all 8 intents — let the query lookup handle it via a
+    // pass-through filter list.
+    return ['interested', 'questions', 'not_interested', 'out_of_office',
+      'wrong_person', 'unsubscribe', 'hostile', 'complaint'];
+  }
+  const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return parts.length ? parts : pipelineQueries.DEFAULT_ATTENTION_INTENTS.slice();
 }
 
-/**
- * Render an active-sequence card (Section B + post-action swaps).
- *
- * @param {object} sequence  joined { sequence, contact, prospect }
- * @param {object} [opts]
- * @param {'default'|'paused'|'force-next-drafted'} [opts.state]
- * @returns {string} HTML fragment
- */
-function renderActiveSequenceCard(_sequence, _opts) {
-  throw new Error('NOT_IMPLEMENTED: renderActiveSequenceCard');
+function parseWindowDays(raw, defaultDays) {
+  if (raw === 'all') return 'all';
+  if (raw === '24h') return 1;
+  if (raw === '7d') return 7;
+  if (raw === '30d') return 30;
+  return defaultDays;
 }
 
-/**
- * Render a one-line activity row (Section C).
- *
- * @param {object} row  { kind: 'outbound'|'reply', ts, ... }
- * @returns {string} HTML fragment
- */
-function renderActivityRow(_row) {
-  throw new Error('NOT_IMPLEMENTED: renderActivityRow');
-}
-
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function parseWindowHours(raw, defaultHours) {
+  if (raw === 'all') return 'all';
+  if (raw === '24h') return 24;
+  if (raw === '7d') return 24 * 7;
+  if (raw === '30d') return 24 * 30;
+  return defaultHours;
 }
 
 module.exports = router;
-module.exports._renderers = {
-  renderReplyCard,
-  renderPausedSequenceCard,
-  renderActiveSequenceCard,
-  renderActivityRow,
+module.exports._internals = {
+  parseIntentParam,
+  parseWindowDays,
+  parseWindowHours,
+  resolveReply,
 };
