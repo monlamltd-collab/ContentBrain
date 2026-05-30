@@ -1276,6 +1276,21 @@ cron.schedule('*/15 * * * *', async () => {
               await supabase.from('posts').update({ fb_post_id: result.postId }).eq('id', post.id);
             } catch (e) { console.warn(`  fb_post_id save failed: ${e.message}`); }
           }
+
+          // Phase G — boost hook. Only fires for social-track posts that the
+          // orchestrator marked boost_eligible. Wrapped in try/catch: a boost
+          // row failure must NOT roll back the publish — the post is already
+          // live on FB and this is a best-effort paid amplification. Skip
+          // for outbound and any non-social track.
+          if (post.track === 'social' && post.meta && post.meta.boost_eligible === true && result.postId) {
+            try {
+              const { requestBoost } = require('./lib/social-engine/boost');
+              await requestBoost(post, result.postId);
+            } catch (err) {
+              console.warn(`  [boost] hook failed for ${post.id}: ${err.message}`);
+            }
+          }
+
           console.log(`  Published: ${post.id} (${post.brand}/${post.platform || post.channel || 'n/a'}) ref:${result.postId || result.resendId || 'n/a'}`);
         }
       } catch (err) {
@@ -1386,21 +1401,33 @@ cron.schedule('0 20 * * *', async () => {
   }
 });
 
-// Daily Lot of the Day at 07:00 UTC — picks today's archetype, generates
-// caption + voiceover script, inserts a draft, and pings Simon to record.
-// The voice-memo reply (handled in pollTelegram below) drives the rest of
-// the flow: audio cleanup, render, review, publish.
-cron.schedule('0 7 * * *', async () => {
-  try {
-    const { runLotOfTheDay } = require('./lib/lot-flow');
-    await runLotOfTheDay();
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] Lot of the Day cron error: ${err.message}`);
-    try {
-      await sendNotification(`<b>Lot of the Day cron failed:</b> ${err.message.slice(0, 200)}`);
-    } catch {}
-  }
-});
+// Phase G — Daily social-engine post at 07:00 UTC.
+//
+// Replaces the previous runLotOfTheDay() cron. The new orchestrator
+// chooses today's mode + type, and when type === 'lot-of-day-traffic' it
+// DELEGATES back to runLotOfTheDay verbatim — so the existing voice-memo
+// workflow still works for that archetype. For every other type it picks,
+// renders, inserts a draft, and sends to Telegram for review.
+//
+// TODO: unmute after HLP compliance email — see Phase G architecture
+// Part 12. The cron is intentionally MUTED in production by keeping the
+// registration commented out. Tests exercise runDailySocialPost directly
+// without firing the cron. To unmute: remove the leading `//` from the
+// cron.schedule line below AND confirm the HLP compliance pre-flight has
+// been sent + acknowledged (architecture Part 12 — "before first live
+// post, get HLP compliance to ack the Page positioning + sample 5 posts").
+//
+// cron.schedule('0 7 * * *', async () => {
+//   try {
+//     const { runDailySocialPost } = require('./lib/social-engine/orchestrator');
+//     await runDailySocialPost();
+//   } catch (err) {
+//     console.error(`[${new Date().toISOString()}] Phase G cron error: ${err.message}`);
+//     try {
+//       await sendNotification(`<b>Phase G social-engine cron failed:</b> ${err.message.slice(0, 200)}`);
+//     } catch {}
+//   }
+// });
 
 // ── WEEKLY SUPERLATIVE REELS ──
 // Monday 08:00 — generate the five "X of the week" auction reels (cheapest,

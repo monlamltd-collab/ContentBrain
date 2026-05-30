@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: {{WIDTH}}px;
+    height: {{HEIGHT}}px;
+    background: {{CREAM}};
+    font-family: {{BODY_FONT}};
+    overflow: hidden;
+    position: relative;
+  }
+
+  .logo {
+    position: absolute;
+    top: 36px;
+    left: 36px;
+    height: 60px;
+  }
+
+  .content {
+    position: absolute;
+    inset: 130px 64px 130px 64px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+  }
+
+  .headline {
+    font-family: {{HEADING_FONT}};
+    font-size: {{HEADLINE_SIZE}}px;
+    font-weight: 700;
+    color: {{NAVY}};
+    line-height: 1.05;
+    margin-bottom: 40px;
+  }
+
+  .body-text {
+    font-size: 28px;
+    color: {{NAVY}};
+    opacity: 0.78;
+    line-height: 1.4;
+    margin-bottom: 28px;
+  }
+
+  .stat-pill {
+    background: {{GREEN}};
+    color: #ffffff;
+    padding: 16px 28px;
+    border-radius: 6px;
+    font-family: {{HEADING_FONT}};
+    font-size: 32px;
+    font-weight: 700;
+  }
+
+  .footer-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: {{NAVY}};
+    padding: 22px 36px;
+    color: {{CREAM}};
+    font-family: {{BODY_FONT}};
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .brand-mark {
+    position: absolute;
+    bottom: 92px;
+    right: 36px;
+    color: {{NAVY}};
+    opacity: 0.55;
+    font-size: 16px;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+  <img class="logo" src="{{LOGO_URL}}" alt="logo">
+  <div class="content">
+    <div class="headline">{{HEADLINE}}</div>
+    <div class="body-text">{{BODY}}</div>
+    <div class="stat-pill">{{MICRO_STAT}}</div>
+  </div>
+  <div class="brand-mark">Unloved Britain</div>
+  <div class="footer-bar">{{FOLLOW_OR_CTA}}</div>
+</body>
+</html>
