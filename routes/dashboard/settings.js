@@ -1,382 +1,496 @@
 'use strict';
 
-// routes/dashboard/settings.js
-//
-// Phase F-2 — the Settings tab. Fifth and final dashboard tab; replaces
-// the Telegram /tone, /messages, /hooks, /active, /templates, /directive
-// command-hopping with one web UI. Every control writes the same
-// app_config rows the existing Telegram commands do — no new persistence
-// model.
-//
-// HTMX patterns mirror routes/dashboard/pipeline.js: body-parser scoped to
-// THIS router only, every POST returns an HTML fragment for outerHTML swap.
-// No JSON; no redirects; the swap surface is the control itself with a
-// .saved-flash badge on success.
-//
-// All bodies are STUBS — coder fills these per the design doc §1 + §3.
-// Architect deliverable is the route shape, validation contracts and the
-// JSDoc on every handler.
-//
-// Source of truth: .ruflo/phase-f-settings-tab-design.md.
+// routes/dashboard/settings.js — Phase F-2 Settings tab.
+// HTMX pattern mirrors routes/dashboard/pipeline.js: scoped body-parser,
+// every POST returns an HTML fragment for outerHTML swap. Source of truth:
+// .ruflo/phase-f-settings-tab-design.md.
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 
 const router = express.Router();
-
-// Body-parser scoped — mirrors routes/dashboard/approve.js + pipeline.js.
-// HTMX POST form bodies arrive as application/x-www-form-urlencoded; we
-// scope the parser to this router so the dashboard shell doesn't have to
-// global-mount one.
 router.use(express.urlencoded({ extended: false }));
 
 const settingsQueries = require('../../lib/dashboard/settings-queries');
 const renderers = require('../../lib/dashboard/settings-render');
+const runtimeConfig = require('../../lib/runtime-config');
+const warming = require('../../lib/warming');
+const suppression = require('../../lib/suppression');
+const { assertSuppressionReason } = require('../../lib/sales-brain/constants');
+const telegram = require('../../lib/telegram');
 
-// Cache the static template at module load — same pattern as pipeline.js.
+const { VALID_TRACKS, VALID_CONTENT_BRANDS, VALID_TEMPLATE_TYPES } = settingsQueries;
+
 const TEMPLATE_PATH = path.join(__dirname, 'settings.html');
 let TEMPLATE_CACHE = null;
 function getTemplate() {
-  if (TEMPLATE_CACHE == null) {
-    TEMPLATE_CACHE = fs.readFileSync(TEMPLATE_PATH, 'utf8');
-  }
+  if (TEMPLATE_CACHE == null) TEMPLATE_CACHE = fs.readFileSync(TEMPLATE_PATH, 'utf8');
   return TEMPLATE_CACHE;
+}
+
+const trim = s => typeof s === 'string' ? s.trim() : '';
+
+// HTML form unchecked checkboxes are absent; checked ones come through as
+// the input's value ('on' by default) or 'true'/'1'.
+function isTruthyFormField(v) {
+  if (v == null) return false;
+  if (typeof v === 'string') {
+    const lower = v.trim().toLowerCase();
+    return lower === 'on' || lower === '1' || lower === 'true' || lower === 'yes';
+  }
+  return !!v;
+}
+
+function send400(res, message) {
+  res.status(400).set('Content-Type', 'text/html; charset=utf-8');
+  return res.send(renderers.renderErrorFlash(message));
+}
+function send500(res, message) {
+  res.status(500).set('Content-Type', 'text/html; charset=utf-8');
+  return res.send(renderers.renderErrorFlash(message));
+}
+function withSavedFlash(html) {
+  return html.replace('class="saved-flash"', 'class="saved-flash show"');
 }
 
 // ── Main tab render ───────────────────────────────────────────────────────
 
-/**
- * GET /dashboard/settings — Settings tab shell. Each of the four sections
- * (Outbound, Suppression, Content, System) sub-loads its own initial state
- * via hx-trigger="load" on its wrapper div (see settings.html).
- *
- * No section data is server-rendered into the shell — keeps this handler
- * I/O free so the user sees the anchor nav + section skeletons instantly.
- */
 router.get('/', (_req, res) => {
-  throw new Error('NOT_IMPLEMENTED: GET /dashboard/settings — coder owns the body');
+  try {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(getTemplate());
+  } catch (err) {
+    console.error('[dashboard/settings] template read error:', err.message);
+    res.status(500).send(`<p class="error">Failed to load Settings tab: ${renderers.escHtml(err.message)}</p>`);
+  }
 });
 
 // ── Section 1 — Outbound ──────────────────────────────────────────────────
 
-/**
- * GET /outbound/:track/status — HTMX fragment for one track's collapsible
- * block (warming status + pause toggle + steady-cap + from-address + tone).
- *
- * Used by both the initial load (settings.html has one of these per track)
- * and by per-control POSTs that need to re-render the whole block (e.g.
- * pause toggle, which affects the read-only status panel above it).
- *
- * Validation: :track must be in settingsQueries.VALID_TRACKS or return 400.
- *
- * @returns {string} HTML for one renderOutboundCard(track, status) block
- */
-router.get('/outbound/:track/status', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: GET /outbound/:track/status — coder owns the body');
+router.get('/outbound/:track/status', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  try {
+    const status = await settingsQueries.getOutboundTrackStatus(track);
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(renderers.renderOutboundCard(track, status));
+  } catch (err) {
+    console.error(`[dashboard/settings] GET /outbound/${track}/status: ${err.message}`);
+    return send500(res, `Failed to load ${track} track: ${err.message}`);
+  }
 });
 
-/**
- * POST /outbound/:track/pause — pause sending on this track immediately.
- *
- * Calls warming.pauseTrack(track). No hx-confirm: pausing is the safe
- * action and Simon may need to flip it fast during a deliverability
- * incident. Returns the re-rendered card with the paused badge on.
- *
- * Validation: :track must be in settingsQueries.VALID_TRACKS or return 400.
- */
-router.post('/outbound/:track/pause', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /outbound/:track/pause — coder owns the body');
+async function reRenderTrack(res, track, { flash = false } = {}) {
+  const status = await settingsQueries.getOutboundTrackStatus(track);
+  let html = renderers.renderOutboundCard(track, status);
+  if (flash) html = withSavedFlash(html);
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.set('HX-Trigger', 'settings-saved');
+  res.send(html);
+}
+
+router.post('/outbound/:track/pause', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  try {
+    await warming.pauseTrack(track);
+    return reRenderTrack(res, track, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /outbound/${track}/pause: ${err.message}`);
+    return send500(res, `Pause failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /outbound/:track/resume — resume sending on this track immediately.
- *
- * Calls warming.resumeTrack(track). Returns the re-rendered card with the
- * paused badge off.
- *
- * Validation: :track must be in settingsQueries.VALID_TRACKS or return 400.
- */
-router.post('/outbound/:track/resume', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /outbound/:track/resume — coder owns the body');
+router.post('/outbound/:track/resume', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  try {
+    await warming.resumeTrack(track);
+    return reRenderTrack(res, track, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /outbound/${track}/resume: ${err.message}`);
+    return send500(res, `Resume failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /outbound/:track/steady-cap — write or clear the steady-state cap
- * override for a track.
- *
- * Form body:
- *   steady_cap (string) — empty/missing means "no value submitted"
- *   reset      (string) — present means "Reset to default" button hit
- *
- * Behaviour:
- *   - If `reset` is present OR `steady_cap` is empty → DELETE the
- *     `app_config WHERE brand='global' AND key='outbound.warming.<track>.steady_cap'`
- *     row (so warming.getCurrentCap falls back to DEFAULT_STEADY_CAP=300).
- *   - Otherwise: parseInt + range-check (0..2000); upsert the row.
- *
- * Validation: track ∈ VALID_TRACKS; steady_cap numeric in range.
- * Returns the re-rendered control with .saved-flash on success.
- *
- * NOTE: warming bypasses runtime-config's cache (see design doc §4.3),
- * so the write is immediately effective on the next cron tick.
- */
-router.post('/outbound/:track/steady-cap', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /outbound/:track/steady-cap — coder owns the body');
+router.post('/outbound/:track/steady-cap', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  const body = req.body || {};
+  const reset = body.reset !== undefined && body.reset !== '';
+  const rawCap = trim(body.steady_cap);
+  const key = `outbound.warming.${track}.steady_cap`;
+
+  try {
+    if (reset || rawCap === '') {
+      // DELETE the row — warming.getCurrentCap falls back to default 300.
+      await runtimeConfig.clearLever('global', key);
+    } else {
+      const cap = parseInt(rawCap, 10);
+      if (!Number.isFinite(cap) || cap < 0 || cap > 2000) {
+        return send400(res, 'Steady cap must be a whole number between 0 and 2000.');
+      }
+      await runtimeConfig.setLever('global', key, cap);
+    }
+    return reRenderTrack(res, track, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /outbound/${track}/steady-cap: ${err.message}`);
+    return send500(res, `Steady cap save failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /outbound/:track/from-address — write or clear the from-address
- * override for a track.
- *
- * Form body:
- *   from_address (string) — RFC 5322 form ("Name <addr@domain>" or "addr@domain")
- *   clear        (string) — present means "Clear override (use env)" button hit
- *
- * Behaviour:
- *   - If `clear` is present OR `from_address` is empty → clearLever('global',
- *     `outbound.from.<track>`).
- *   - Otherwise: setLever('global', `outbound.from.<track>`, trimmed).
- *
- * Validation: track ∈ VALID_TRACKS; from_address must contain '@' and must
- * not contain '<script' or HTML angle brackets except as part of a RFC 5322
- * display-name (`Name <addr@domain>`).
- *
- * NOTE: this lever is honoured by lib/resend-from.js#getResendFrom (Phase
- * F-2 precedence change). setLever busts the runtime-config cache for free.
- */
-router.post('/outbound/:track/from-address', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /outbound/:track/from-address — coder owns the body');
+router.post('/outbound/:track/from-address', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  const body = req.body || {};
+  const clear = body.clear !== undefined && body.clear !== '';
+  const rawFrom = trim(body.from_address);
+  const key = `outbound.from.${track}`;
+
+  try {
+    if (clear || rawFrom === '') {
+      await runtimeConfig.clearLever('global', key);
+    } else {
+      // Basic shape check — must contain '@'. Reject embedded HTML tags
+      // (except the RFC 5322 display-name angle brackets that wrap the addr).
+      if (!rawFrom.includes('@')) {
+        return send400(res, 'From address must contain &lsquo;@&rsquo;.');
+      }
+      // Block any < that isn't part of an RFC 5322 display-name wrap.
+      // Heuristic: at most one pair of <...> and it must come AFTER text.
+      const openCount = (rawFrom.match(/</g) || []).length;
+      const closeCount = (rawFrom.match(/>/g) || []).length;
+      if (openCount > 1 || closeCount > 1 || /<\s*(script|style|iframe|img)/i.test(rawFrom)) {
+        return send400(res, 'From address contains disallowed characters.');
+      }
+      await runtimeConfig.setLever('global', key, rawFrom);
+    }
+    return reRenderTrack(res, track, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /outbound/${track}/from-address: ${err.message}`);
+    return send500(res, `From-address save failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /outbound/:track/tone — write or clear the tone override for a track.
- *
- * Form body:
- *   tone  (string) — free text, capped at 500 chars
- *   clear (string) — present means "Reset to default" button hit
- *
- * Behaviour:
- *   - If `clear` is present OR `tone` is empty → clearLever('global',
- *     `outbound_tone_<track>`). (Note: underscored key, not dotted — matches
- *     the existing convention in lib/generate-outbound.js.)
- *   - Otherwise: trim; reject if > 500 chars; setLever('global',
- *     `outbound_tone_<track>`, trimmed).
- *
- * Validation: track ∈ VALID_TRACKS; tone.length ≤ 500 after trim.
- */
-router.post('/outbound/:track/tone', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /outbound/:track/tone — coder owns the body');
+router.post('/outbound/:track/tone', async (req, res) => {
+  const track = req.params.track;
+  if (!VALID_TRACKS.includes(track)) {
+    return send400(res, `Unknown track '${track}'.`);
+  }
+  const body = req.body || {};
+  const clear = body.clear !== undefined && body.clear !== '';
+  const rawTone = trim(body.tone);
+  const key = `outbound_tone_${track}`;
+
+  try {
+    if (clear || rawTone === '') {
+      await runtimeConfig.clearLever('global', key);
+    } else {
+      if (rawTone.length > 500) {
+        return send400(res, `Tone is ${rawTone.length} chars; max 500.`);
+      }
+      await runtimeConfig.setLever('global', key, rawTone);
+    }
+    return reRenderTrack(res, track, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /outbound/${track}/tone: ${err.message}`);
+    return send500(res, `Tone save failed: ${err.message}`);
+  }
 });
 
 // ── Section 2 — Suppression ───────────────────────────────────────────────
 
-/**
- * GET /suppression?page=N&q=foo — paginated suppression table fragment.
- *
- * Page 0 returns the table shell + first 25 rows + Load more button.
- * Page > 0 returns just the next 25 <tr> rows (for beforeend swap into
- * #suppression-tbody).
- *
- * Query:
- *   page (string)  — zero-based; default 0
- *   q    (string)  — case-insensitive substring filter on email_or_domain
- *
- * Validation: page parses to a non-negative integer; q is trimmed.
- */
-router.get('/suppression', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: GET /suppression — coder owns the body');
+router.get('/suppression', async (req, res) => {
+  const rawPage = parseInt(req.query.page, 10);
+  const page = Number.isFinite(rawPage) && rawPage >= 0 ? rawPage : 0;
+  const q = trim(req.query.q);
+
+  try {
+    const { rows, hasMore } = await settingsQueries.getSuppressionPage({ page, q });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(renderers.renderSuppressionTable(rows, q, hasMore, page));
+  } catch (err) {
+    console.error(`[dashboard/settings] GET /suppression: ${err.message}`);
+    return send500(res, `Failed to load suppression list: ${err.message}`);
+  }
 });
 
-/**
- * POST /suppression/add — INSERT a row via suppression.addSuppression.
- *
- * Form body:
- *   email_or_domain (string, required)
- *   reason          (string, required) — must be in VALID_SUPPRESSION_REASONS
- *
- * Behaviour: addSuppression(email_or_domain, reason). On success returns
- * the new <tr> fragment (renderSuppressionRow) + an OOB swap to clear the
- * add form. On idempotent no-op (row already existed) still returns the
- * <tr> so the table updates if the user was paginated past it.
- *
- * Validation: email_or_domain non-empty after trim; reason in
- * VALID_SUPPRESSION_REASONS (use assertSuppressionReason from
- * lib/sales-brain/constants.js).
- */
-router.post('/suppression/add', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /suppression/add — coder owns the body');
+router.post('/suppression/add', async (req, res) => {
+  const body = req.body || {};
+  const emailOrDomain = trim(body.email_or_domain);
+  const reason = trim(body.reason);
+
+  if (!emailOrDomain) {
+    return send400(res, 'Email or domain is required.');
+  }
+  try {
+    assertSuppressionReason(reason);
+  } catch (err) {
+    return send400(res, err.message);
+  }
+
+  try {
+    await suppression.addSuppression(emailOrDomain, reason);
+    // Re-render the row using the canonical lowercased key.
+    const rowHtml = renderers.renderSuppressionRow({
+      email_or_domain: emailOrDomain.toLowerCase(),
+      reason,
+      added_at: new Date().toISOString(),
+    });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('HX-Trigger', 'settings-saved');
+    res.send(rowHtml);
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /suppression/add: ${err.message}`);
+    return send500(res, `Add to suppression failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /suppression/remove — DELETE a row via suppression.removeSuppression
- * (Phase F-2's new helper).
- *
- * Form body:
- *   email_or_domain (string, required) — the key to remove
- *
- * Behaviour:
- *   1. removeSuppression(email_or_domain)
- *   2. sendNotification(`Settings: removed <code>${escapeHtml(key)}</code>
- *      from suppression list.`) — Telegram paper trail per design §6.6.
- *   3. Return empty 200 (the row-level hx-target removes the <tr>).
- *
- * NOTE: uses POST not DELETE because the table's per-row button is a
- * regular <form> with a hidden email_or_domain input — keeps the HTML
- * simpler than the DELETE-with-encoded-key pattern in the design doc §3.3
- * (architect call: POST + form body is more robust to special chars in
- * email addresses like '+', '%', etc., which need careful URL-encoding).
- *
- * Validation: email_or_domain non-empty after trim.
- */
-router.post('/suppression/remove', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /suppression/remove — coder owns the body');
+router.post('/suppression/remove', async (req, res) => {
+  const body = req.body || {};
+  const emailOrDomain = trim(body.email_or_domain);
+
+  if (!emailOrDomain) {
+    return send400(res, 'Email or domain is required.');
+  }
+
+  try {
+    const result = await suppression.removeSuppression(emailOrDomain);
+
+    // Telegram receipt — best-effort, never blocks the response.
+    try {
+      const verb = result.removed ? 'removed' : 'attempted to remove (no row found)';
+      await telegram.sendNotification(
+        `Settings: ${verb} <code>${renderers.escHtml(result.emailOrDomain)}</code> from suppression list.`
+      );
+    } catch (notifyErr) {
+      console.warn(`[dashboard/settings] Telegram notify failed: ${notifyErr.message}`);
+    }
+
+    // Empty 200 — the <tr> hx-target wipes the row on outerHTML swap.
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('HX-Trigger', 'settings-saved');
+    res.send('');
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /suppression/remove: ${err.message}`);
+    return send500(res, `Remove from suppression failed: ${err.message}`);
+  }
 });
 
 // ── Section 3 — Content ───────────────────────────────────────────────────
 
-/**
- * GET /content/brands — render the brand cards section (active toggles +
- * editorial directive textareas per brand).
- *
- * Reads via getContentLevers + iterates VALID_CONTENT_BRANDS.
- */
-router.get('/content/brands', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: GET /content/brands — coder owns the body');
+router.get('/content/brands', async (_req, res) => {
+  try {
+    const levers = await settingsQueries.getContentLevers();
+    const cards = VALID_CONTENT_BRANDS.map(b =>
+      renderers.renderContentCard(b, levers.active_brands.includes(b), levers.directives[b])
+    ).join('\n');
+    const weightsForm = renderers.renderTemplateWeights(levers.template_weights);
+
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<div id="content-brands">
+${cards}
+${weightsForm}
+</div>`);
+  } catch (err) {
+    console.error(`[dashboard/settings] GET /content/brands: ${err.message}`);
+    return send500(res, `Failed to load content levers: ${err.message}`);
+  }
 });
 
-/**
- * POST /content/brand/:brand/active — toggle whether a brand is in
- * active_brands.
- *
- * Form body:
- *   active (string) — 'on' if the checkbox is checked, absent otherwise
- *     (HTML form behaviour for unchecked checkboxes)
- *
- * Behaviour:
- *   - Read current active_brands via getActiveBrands().
- *   - If `active` present and brand not in array → add and setLever.
- *   - If `active` absent and brand in array → remove and setLever.
- *   - Empty array IS a valid value (semantically "content paused").
- *
- * Validation: brand ∈ VALID_CONTENT_BRANDS.
- */
-router.post('/content/brand/:brand/active', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /content/brand/:brand/active — coder owns the body');
+router.post('/content/brand/:brand/active', async (req, res) => {
+  const brand = req.params.brand;
+  if (!VALID_CONTENT_BRANDS.includes(brand)) {
+    return send400(res, `Unknown brand '${brand}'.`);
+  }
+  const active = isTruthyFormField((req.body || {}).active);
+
+  try {
+    const current = await runtimeConfig.getActiveBrands();
+    const set = new Set(Array.isArray(current) ? current : []);
+    if (active) set.add(brand);
+    else set.delete(brand);
+    const next = Array.from(set);
+    await runtimeConfig.setLever('global', 'active_brands', next);
+
+    // Re-render this brand card (with the directive textarea preserved).
+    const directive = await runtimeConfig.getBrandDirective(brand);
+    let html = renderers.renderContentCard(brand, active, directive);
+    html = withSavedFlash(html);
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('HX-Trigger', 'settings-saved');
+    res.send(html);
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /content/brand/${brand}/active: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /content/template-weights — bulk save the four template weights.
- *
- * Form body:
- *   weight_stat, weight_hook, weight_list, weight_reel (strings, 0..5)
- *   reset (string) — if present, DELETE the row (back to 1/1/1/1)
- *
- * Behaviour:
- *   - If `reset` present → clearLever('global', 'template_weights').
- *   - Otherwise: parse all four as non-negative integers, range-check
- *     (0..5), setLever('global', 'template_weights', {stat, hook, list, reel}).
- *
- * Validation: each weight integer in [0, 5].
- */
-router.post('/content/template-weights', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /content/template-weights — coder owns the body');
+router.post('/content/template-weights', async (req, res) => {
+  const body = req.body || {};
+  const reset = body.reset !== undefined && body.reset !== '';
+
+  try {
+    if (reset) {
+      await runtimeConfig.clearLever('global', 'template_weights');
+    } else {
+      const weights = {};
+      for (const t of VALID_TEMPLATE_TYPES) {
+        const raw = body[`weight_${t}`];
+        const n = parseInt(raw, 10);
+        if (!Number.isFinite(n) || n < 0 || n > 5) {
+          return send400(res, `Weight for '${t}' must be an integer 0-5 (got '${raw}').`);
+        }
+        weights[t] = n;
+      }
+      await runtimeConfig.setLever('global', 'template_weights', weights);
+    }
+
+    const levers = await settingsQueries.getContentLevers();
+    let html = renderers.renderTemplateWeights(levers.template_weights);
+    html = withSavedFlash(html);
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('HX-Trigger', 'settings-saved');
+    res.send(html);
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /content/template-weights: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
 });
 
-/**
- * POST /content/brand/:brand/directive — write or clear the editorial
- * directive for a brand.
- *
- * Form body:
- *   directive (string) — free text, capped at 1000 chars
- *   clear     (string) — if present, DELETE the row
- *
- * Behaviour:
- *   - If `clear` present OR directive empty → clearLever(brand, 'directive').
- *   - Otherwise: trim; reject if > 1000 chars; setLever(brand, 'directive',
- *     trimmed). NOTE: brand-scoped, not 'global'.
- *
- * Validation: brand ∈ VALID_CONTENT_BRANDS; directive.length ≤ 1000.
- */
-router.post('/content/brand/:brand/directive', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /content/brand/:brand/directive — coder owns the body');
+router.post('/content/brand/:brand/directive', async (req, res) => {
+  const brand = req.params.brand;
+  if (!VALID_CONTENT_BRANDS.includes(brand)) {
+    return send400(res, `Unknown brand '${brand}'.`);
+  }
+  const body = req.body || {};
+  const clear = body.clear !== undefined && body.clear !== '';
+  const rawDirective = trim(body.directive);
+
+  try {
+    if (clear || rawDirective === '') {
+      await runtimeConfig.clearLever(brand, 'directive');
+    } else {
+      if (rawDirective.length > 1000) {
+        return send400(res, `Directive is ${rawDirective.length} chars; max 1000.`);
+      }
+      await runtimeConfig.setLever(brand, 'directive', rawDirective);
+    }
+
+    const directive = await runtimeConfig.getBrandDirective(brand);
+    const active = (await runtimeConfig.getActiveBrands()).includes(brand);
+    let html = renderers.renderContentCard(brand, active, directive);
+    html = withSavedFlash(html);
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('HX-Trigger', 'settings-saved');
+    res.send(html);
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /content/brand/${brand}/directive: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
 });
 
 // ── Section 4 — System ────────────────────────────────────────────────────
 
-/**
- * GET /system — render the three system controls (bulk-approve cap,
- * Telegram receipt toggle, suppression-check danger toggle) in one swap.
- *
- * Reads via settingsQueries.getSystemLevers + renderers.renderSystemSection.
- * Mirror of GET /content/brands; both sections are small enough that one
- * read + one render is cheaper than per-control sub-loads.
- */
-router.get('/system', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: GET /system — coder owns the body');
+async function reRenderSystem(res, { flash = false } = {}) {
+  const levers = await settingsQueries.getSystemLevers();
+  let html = renderers.renderSystemSection(levers);
+  if (flash) html = withSavedFlash(html);
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.set('HX-Trigger', 'settings-saved');
+  res.send(html);
+}
+
+router.get('/system', async (_req, res) => {
+  try {
+    return reRenderSystem(res);
+  } catch (err) {
+    console.error(`[dashboard/settings] GET /system: ${err.message}`);
+    return send500(res, `Failed to load system levers: ${err.message}`);
+  }
+});
+
+router.post('/system/bulk-approve-cap', async (req, res) => {
+  const body = req.body || {};
+  const reset = body.reset !== undefined && body.reset !== '';
+  const rawCap = trim(body.cap);
+  const key = 'dashboard.bulk_approve_cap';
+
+  try {
+    if (reset || rawCap === '') {
+      await runtimeConfig.clearLever('global', key);
+    } else {
+      const cap = parseInt(rawCap, 10);
+      if (!Number.isFinite(cap) || cap < 1 || cap > 50) {
+        return send400(res, 'Bulk approve cap must be a whole number between 1 and 50.');
+      }
+      await runtimeConfig.setLever('global', key, cap);
+    }
+    return reRenderSystem(res, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /system/bulk-approve-cap: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
+});
+
+router.post('/system/telegram-receipt', async (req, res) => {
+  const enabled = isTruthyFormField((req.body || {}).enabled);
+  const key = 'dashboard.send_telegram_receipt';
+
+  try {
+    if (enabled) {
+      // ON is the default — clear the row so the default applies cleanly.
+      await runtimeConfig.clearLever('global', key);
+    } else {
+      await runtimeConfig.setLever('global', key, false);
+    }
+    return reRenderSystem(res, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /system/telegram-receipt: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
 });
 
 /**
- * POST /system/bulk-approve-cap — write or clear dashboard.bulk_approve_cap.
- *
- * Form body:
- *   cap   (string)  — number 1..50
- *   reset (string)  — if present, DELETE the row (back to default 10)
- *
- * Behaviour:
- *   - If `reset` present OR cap empty → clearLever('global',
- *     'dashboard.bulk_approve_cap').
- *   - Otherwise: parseInt + range-check (1..50); setLever.
- *
- * Validation: cap integer in [1, 50]. Hard upper limit 50 keeps the bulk
- * approve loop from hitting Resend rate-limits in one click.
+ * NOTE — write-only lever. lib/publish.js#publishToResend still calls
+ * isSuppressed unconditionally; this toggle records intent but does NOT
+ * gate the read side (yet). The safe failure mode is "check stays on".
+ * See design doc §6.3 + the JSDoc on the lib/publish.js call site for the
+ * read-side wiring TODO.
  */
-router.post('/system/bulk-approve-cap', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /system/bulk-approve-cap — coder owns the body');
-});
+router.post('/system/suppression-check', async (req, res) => {
+  const enabled = isTruthyFormField((req.body || {}).enabled);
+  const key = 'outbound.suppression_check_enabled';
 
-/**
- * POST /system/telegram-receipt — toggle dashboard.send_telegram_receipt.
- *
- * Form body:
- *   enabled (string) — 'on' if checked, absent otherwise
- *
- * Behaviour (matches lib/outbound-receipt.js's "missing row = default ON"
- * semantics):
- *   - If `enabled` present → clearLever (so the default ON re-applies cleanly).
- *   - If `enabled` absent → setLever('global', 'dashboard.send_telegram_receipt', false).
- */
-router.post('/system/telegram-receipt', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /system/telegram-receipt — coder owns the body');
-});
+  try {
+    await runtimeConfig.setLever('global', key, enabled);
 
-/**
- * POST /system/suppression-check — toggle outbound.suppression_check_enabled.
- *
- * DANGER — disabling this breaks PECR compliance + risks Resend deactivation.
- * The HTML form uses hx-confirm with the full warning text (see design doc
- * §3.4) AND the control has a 2px red border via .danger-control class.
- *
- * Form body:
- *   enabled (string) — 'on' if checked, absent otherwise
- *
- * Behaviour:
- *   - setLever('global', 'outbound.suppression_check_enabled', enabled).
- *   - On EVERY flip (regardless of direction), fire sendNotification
- *     to the Telegram channel:
- *       `Settings: suppression_check_enabled toggled <on/off> by dashboard user`
- *
- * This is the only setting that logs to Telegram on every change (paper
- * trail for compliance-sensitive action). See design doc §6.3.
- *
- * IMPORTANT: the READ-SIDE gate for this lever is NOT wired in Phase F-2.
- * lib/publish.js#publishToResend still calls isSuppressed unconditionally
- * — the toggle is currently write-only. That's the SAFE failure mode and
- * is acceptable for F-2; the read-side wiring is a separate change with
- * its own compliance risk (the safe-state default must be ON-when-absent).
- */
-router.post('/system/suppression-check', async (_req, _res) => {
-  throw new Error('NOT_IMPLEMENTED: POST /system/suppression-check — coder owns the body');
+    // Telegram paper trail on every flip.
+    try {
+      await telegram.sendNotification(
+        `Settings: suppression_check_enabled toggled ${enabled ? '<b>ON</b>' : '<b>OFF</b>'} by dashboard user.`
+      );
+    } catch (notifyErr) {
+      console.warn(`[dashboard/settings] Telegram notify failed: ${notifyErr.message}`);
+    }
+
+    return reRenderSystem(res, { flash: true });
+  } catch (err) {
+    console.error(`[dashboard/settings] POST /system/suppression-check: ${err.message}`);
+    return send500(res, `Save failed: ${err.message}`);
+  }
 });
 
 module.exports = router;
+module.exports._internals = { trim, isTruthyFormField, withSavedFlash };
