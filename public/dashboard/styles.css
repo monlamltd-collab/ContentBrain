@@ -514,3 +514,235 @@ main {
 }
 
 .pipeline-load-more:hover { background: #faf8f4; }
+
+/* ── Settings tab (Phase F-2) ─────────────────────────────────────────── */
+
+.settings-tab { max-width: 920px; }
+
+.settings-header h2 { font-size: 22px; margin-bottom: 6px; }
+.settings-header .settings-sub { color: #666; font-size: 14px; margin-bottom: 16px; }
+
+/* Sticky anchor jump nav */
+.settings-anchors {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+  margin-bottom: 16px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e8e8e8;
+}
+.settings-anchors a {
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #475569;
+  text-decoration: none;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+}
+.settings-anchors a:hover { background: #faf8f4; color: #1a2b4b; }
+
+/* Section wrappers */
+.settings-section {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.07);
+}
+.settings-section h3 { font-size: 17px; margin-bottom: 4px; color: #1a2b4b; }
+.settings-section-sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+
+/* Per-control mini-forms */
+.settings-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.settings-control:last-child { border-bottom: none; }
+.settings-control label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #475569;
+}
+.settings-control input[type="text"],
+.settings-control input[type="email"],
+.settings-control input[type="number"],
+.settings-control input[type="search"],
+.settings-control select,
+.settings-control textarea {
+  padding: 6px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.settings-control textarea { min-width: 320px; resize: vertical; }
+.settings-control button {
+  padding: 6px 14px;
+  background: #1a2b4b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-control button:hover { background: #243a64; }
+.settings-control button.link-btn {
+  background: transparent;
+  color: #2563eb;
+  text-decoration: underline;
+  font-weight: 400;
+  padding: 6px 4px;
+}
+.settings-control .char-counter { color: #888; font-size: 12px; }
+.settings-control .muted { color: #888; font-size: 12px; }
+
+/* Saved / error flash */
+.saved-flash {
+  display: inline-block;
+  margin-left: 8px;
+  color: #16a34a;
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0;
+}
+.saved-flash.show { animation: fadeFlash 1.5s ease forwards; }
+@keyframes fadeFlash {
+  0%   { opacity: 1; transform: translateX(0); }
+  80%  { opacity: 1; }
+  100% { opacity: 0; transform: translateX(4px); }
+}
+.error-flash {
+  color: #991b1b;
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Danger control — red border + warning visual cue */
+.settings-control.danger-control {
+  border: 2px solid #dc2626;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fef2f2;
+  margin-top: 12px;
+}
+.settings-control.danger-control label { color: #991b1b; font-weight: 600; }
+
+/* Per-track collapsible outbound block */
+.settings-track-block {
+  margin-bottom: 14px;
+}
+.settings-track-block details {
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 0;
+}
+.settings-track-block details > summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a2b4b;
+  user-select: none;
+  list-style: none;
+}
+.settings-track-block details > summary::-webkit-details-marker { display: none; }
+.settings-track-block details > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 8px;
+  color: #94a3b8;
+  transition: transform 0.15s;
+}
+.settings-track-block details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.settings-track-block details > .track-body {
+  padding: 8px 16px 16px;
+  border-top: 1px solid #e8e8e8;
+}
+
+/* Read-only warming status panel */
+.warming-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 12px;
+}
+
+/* Suppression search + table */
+.suppression-search {
+  margin-bottom: 12px;
+}
+.suppression-search input[type="search"] {
+  width: 320px;
+  padding: 6px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.suppression-add {
+  padding: 12px;
+  background: #fafafa;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.suppression-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.suppression-table th,
+.suppression-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f0;
+}
+.suppression-table th {
+  background: #fafafa;
+  font-weight: 600;
+  color: #475569;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.suppression-table tr:last-child td { border-bottom: none; }
+.suppression-table code {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.suppression-table button {
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #991b1b;
+}
+.suppression-table button:hover { background: #fee2e2; }
+
+/* Loading + empty states */
+.settings-section .loading { color: #888; font-size: 13px; padding: 8px 0; }
+.settings-section .empty   { color: #888; font-size: 13px; padding: 8px 0; }
