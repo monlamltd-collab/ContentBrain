@@ -298,6 +298,18 @@ function form(obj) {
   return new URLSearchParams(obj).toString();
 }
 
+// Convenience: POST a form body to the given path on baseUrl.
+async function postForm(baseUrl, path, obj) {
+  const body = form(obj);
+  return request(baseUrl, 'POST', path, {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': String(body.length),
+    },
+    body,
+  });
+}
+
 beforeEach(() => { fresh(); });
 
 // ── resend-from precedence ───────────────────────────────────────────────
@@ -540,9 +552,7 @@ test('POST /outbound/:track/pause calls warming.pauseTrack and returns saved fra
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/pause', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': '0' },
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/pause', {});
     assert.equal(res.status, 200);
     assert.equal(res.headers['hx-trigger'], 'settings-saved');
     assert.match(res.body, /track-card-lender/);
@@ -556,9 +566,7 @@ test('POST /outbound/:track/resume calls warming.resumeTrack', async () => {
   pausedTracks.add('broker');
   const { server, baseUrl } = await startServer(app);
   try {
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/broker/resume', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': '0' },
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/broker/resume', {});
     assert.equal(res.status, 200);
     assert.deepEqual(pauseCalls, [{ op: 'resume', track: 'broker' }]);
   } finally { server.close(); }
@@ -568,9 +576,7 @@ test('POST /outbound/:track/pause rejects unknown track', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/zzz/pause', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': '0' },
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/zzz/pause', {});
     assert.equal(res.status, 400);
     assert.match(res.body, /Unknown track/);
     assert.equal(pauseCalls.length, 0);
@@ -581,11 +587,7 @@ test('POST /outbound/:track/steady-cap writes a number via setLever', async () =
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ steady_cap: '250' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/steady-cap', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/steady-cap', { steady_cap: '250' });
     assert.equal(res.status, 200);
     assert.equal(setLeverCalls.length, 1);
     assert.equal(setLeverCalls[0].brand, 'global');
@@ -598,11 +600,7 @@ test('POST /outbound/:track/steady-cap with reset=1 calls clearLever', async () 
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ reset: '1' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/steady-cap', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/steady-cap', { reset: '1' });
     assert.equal(res.status, 200);
     assert.equal(clearLeverCalls.length, 1);
     assert.equal(clearLeverCalls[0].key, 'outbound.warming.lender.steady_cap');
@@ -613,11 +611,7 @@ test('POST /outbound/:track/steady-cap rejects out-of-range value', async () => 
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ steady_cap: '9999' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/steady-cap', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/steady-cap', { steady_cap: '9999' });
     assert.equal(res.status, 400);
     assert.match(res.body, /whole number between 0 and 2000/);
     assert.equal(setLeverCalls.length, 0);
@@ -628,11 +622,7 @@ test('POST /outbound/:track/from-address validates @ presence', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ from_address: 'not-an-email' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/from-address', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/from-address', { from_address: 'not-an-email' });
     assert.equal(res.status, 400);
     assert.match(res.body, /must contain/);
     assert.equal(setLeverCalls.length, 0);
@@ -643,11 +633,7 @@ test('POST /outbound/:track/from-address writes a valid override', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ from_address: 'Sam <sam@example.com>' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/from-address', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/from-address', { from_address: 'Sam <sam@example.com>' });
     assert.equal(res.status, 200);
     assert.equal(setLeverCalls[0].key, 'outbound.from.lender');
     assert.equal(setLeverCalls[0].value, 'Sam <sam@example.com>');
@@ -658,11 +644,7 @@ test('POST /outbound/:track/tone rejects overlong tone', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ tone: 'x'.repeat(501) });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/outbound/lender/tone', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/outbound/lender/tone', { tone: 'x'.repeat(501) });
     assert.equal(res.status, 400);
     assert.match(res.body, /max 500/);
   } finally { server.close(); }
@@ -672,11 +654,7 @@ test('POST /suppression/add calls addSuppression and renders the new row', async
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ email_or_domain: 'noreply@example.com', reason: 'manual' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/suppression/add', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/suppression/add', { email_or_domain: 'noreply@example.com', reason: 'manual' });
     assert.equal(res.status, 200);
     assert.match(res.body, /noreply@example.com/);
     assert.match(res.body, /reason-manual/);
@@ -691,11 +669,7 @@ test('POST /suppression/add rejects bad reason', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ email_or_domain: 'x@y.co', reason: 'totally-fake-reason' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/suppression/add', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/suppression/add', { email_or_domain: 'x@y.co', reason: 'totally-fake-reason' });
     assert.equal(res.status, 400);
     assert.match(res.body, /Invalid suppression reason/);
     assert.equal(suppressionCalls.length, 0);
@@ -707,11 +681,7 @@ test('POST /suppression/remove calls removeSuppression and sends Telegram receip
   suppressionRows.push({ email_or_domain: 'old@example.com', reason: 'bounce', added_at: new Date().toISOString() });
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ email_or_domain: 'old@example.com' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/suppression/remove', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/suppression/remove', { email_or_domain: 'old@example.com' });
     assert.equal(res.status, 200);
     assert.equal(res.body, '');
     assert.equal(suppressionCalls.length, 1);
@@ -726,11 +696,7 @@ test('POST /suppression/remove rejects empty key', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ email_or_domain: '' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/suppression/remove', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/suppression/remove', { email_or_domain: '' });
     assert.equal(res.status, 400);
     assert.equal(suppressionCalls.length, 0);
     assert.equal(telegramCalls.length, 0);
@@ -742,11 +708,7 @@ test('POST /content/brand/:brand/active adds brand to active_brands', async () =
   appConfig['global:active_brands'] = ['auctionbrain'];
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ active: 'on' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/content/brand/bridgematch/active', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/content/brand/bridgematch/active', { active: 'on' });
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'active_brands');
     assert.ok(setCall, 'active_brands should be written');
@@ -758,11 +720,7 @@ test('POST /content/template-weights writes a valid weight object', async () => 
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ weight_stat: '2', weight_hook: '1', weight_list: '3', weight_reel: '0' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/content/template-weights', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/content/template-weights', { weight_stat: '2', weight_hook: '1', weight_list: '3', weight_reel: '0' });
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'template_weights');
     assert.ok(setCall);
@@ -774,11 +732,7 @@ test('POST /content/template-weights rejects out-of-range weight', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ weight_stat: '99', weight_hook: '1', weight_list: '1', weight_reel: '1' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/content/template-weights', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/content/template-weights', { weight_stat: '99', weight_hook: '1', weight_list: '1', weight_reel: '1' });
     assert.equal(res.status, 400);
     assert.match(res.body, /must be an integer 0-5/);
   } finally { server.close(); }
@@ -788,11 +742,7 @@ test('POST /content/brand/:brand/directive writes a trimmed directive', async ()
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ directive: '  Lean into stat hooks.  ' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/content/brand/auctionbrain/directive', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/content/brand/auctionbrain/directive', { directive: '  Lean into stat hooks.  ' });
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.brand === 'auctionbrain' && c.key === 'directive');
     assert.ok(setCall);
@@ -804,11 +754,7 @@ test('POST /system/bulk-approve-cap writes a number in range', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ cap: '25' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/bulk-approve-cap', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/bulk-approve-cap', { cap: '25' });
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'dashboard.bulk_approve_cap');
     assert.ok(setCall);
@@ -820,11 +766,7 @@ test('POST /system/bulk-approve-cap rejects value > 50', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ cap: '100' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/bulk-approve-cap', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/bulk-approve-cap', { cap: '100' });
     assert.equal(res.status, 400);
     assert.match(res.body, /between 1 and 50/);
   } finally { server.close(); }
@@ -834,11 +776,7 @@ test('POST /system/telegram-receipt enabled=on clears the lever (default ON)', a
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ enabled: 'on' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/telegram-receipt', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/telegram-receipt', { enabled: 'on' });
     assert.equal(res.status, 200);
     const clearCall = clearLeverCalls.find(c => c.key === 'dashboard.send_telegram_receipt');
     assert.ok(clearCall, 'enabled=on should clear the row so default ON re-applies');
@@ -849,11 +787,7 @@ test('POST /system/telegram-receipt enabled absent writes false', async () => {
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({});
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/telegram-receipt', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/telegram-receipt', {});
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'dashboard.send_telegram_receipt');
     assert.ok(setCall);
@@ -865,11 +799,7 @@ test('POST /system/suppression-check writes the value + sends Telegram log', asy
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({ enabled: 'on' });
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/suppression-check', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/suppression-check', { enabled: 'on' });
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'outbound.suppression_check_enabled');
     assert.ok(setCall);
@@ -883,11 +813,7 @@ test('POST /system/suppression-check toggling OFF still logs to Telegram', async
   const app = loadAppFresh();
   const { server, baseUrl } = await startServer(app);
   try {
-    const body = form({});
-    const res = await request(baseUrl, 'POST', '/dashboard/settings/system/suppression-check', {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': String(body.length) },
-      body,
-    });
+    const res = await postForm(baseUrl, '/dashboard/settings/system/suppression-check', {});
     assert.equal(res.status, 200);
     const setCall = setLeverCalls.find(c => c.key === 'outbound.suppression_check_enabled');
     assert.ok(setCall);
