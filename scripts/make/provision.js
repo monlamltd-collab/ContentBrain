@@ -57,24 +57,45 @@ const BLUEPRINTS = [
  * recursively. Make's schema validator rejects unknown top-level keys
  * like _doc / _targetTeamId / _fbConnectionId; we keep these in the
  * source files for human reference and remove them at provision time.
+ *
+ * Depth-first. Arrays preserved as arrays. Primitives returned as-is.
+ *
  * @param {*} obj
- * @returns {*} a new object with underscore-prefixed keys removed
+ * @returns {*} a new value with underscore-prefixed keys removed
  */
 function stripDocs(obj) {
-  // Stub for coder — recursive walk, skip keys starting with '_'
-  throw new Error('NOT_IMPLEMENTED: stripDocs');
+  if (Array.isArray(obj)) return obj.map(stripDocs);
+  if (obj && typeof obj === 'object') {
+    const out = {};
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('_')) continue;
+      out[key] = stripDocs(obj[key]);
+    }
+    return out;
+  }
+  return obj;
 }
 
 /**
- * Read a blueprint file and parse-clean it.
+ * Read a blueprint file and parse-clean it. Returns the name + the
+ * stripped blueprint + the scheduling preference (if present at top
+ * level under `_scheduling`).
+ *
  * @param {string} filePath
- * @returns {{name: string, blueprint: object, scheduling: object}}
+ * @returns {{name: string, blueprint: object, scheduling: object|null}}
  */
 function readBlueprint(filePath) {
-  // Stub for coder — fs.readFileSync, JSON.parse, stripDocs, return
-  // {name, blueprint, scheduling}. The Make API wants `name` at
-  // scenario-create level AND inside `blueprint.name`.
-  throw new Error('NOT_IMPLEMENTED: readBlueprint');
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const parsed = JSON.parse(raw);
+  const stripped = stripDocs(parsed);
+  const name = stripped.name;
+  if (!name) throw new Error(`Blueprint ${filePath} has no top-level "name"`);
+  // Make's POST /scenarios takes scheduling as a separate top-level param,
+  // not inside the blueprint. Lift it out (after strip so _doc inside the
+  // scheduling object is gone too).
+  const scheduling = stripped.scheduling || null;
+  if (stripped.scheduling) delete stripped.scheduling;
+  return { name, blueprint: stripped, scheduling };
 }
 
 /**
@@ -86,9 +107,24 @@ function readBlueprint(filePath) {
  * @returns {Promise<object>}  parsed JSON response
  */
 async function makeApi(method, pathPart, body) {
-  // Stub for coder — global fetch, Authorization: Token <MAKE_API_TOKEN>,
-  // content-type application/json, JSON.stringify body if present.
-  throw new Error('NOT_IMPLEMENTED: makeApi');
+  const url = `${MAKE_API_BASE}${pathPart}`;
+  const headers = {
+    Authorization: `Token ${process.env.MAKE_API_TOKEN}`,
+    Accept: 'application/json',
+  };
+  const opts = { method, headers };
+  if (body != null) {
+    headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(url, opts);
+  let parsed;
+  const text = await resp.text();
+  try { parsed = text ? JSON.parse(text) : {}; } catch (_) { parsed = { _rawText: text }; }
+  if (!resp.ok) {
+    throw new Error(`Make API ${method} ${pathPart} -> ${resp.status}: ${text.slice(0, 400)}`);
+  }
+  return parsed;
 }
 
 /**
@@ -96,34 +132,44 @@ async function makeApi(method, pathPart, body) {
  * @returns {Promise<Array<{id: number, name: string, hookId: number|null}>>}
  */
 async function listExistingScenarios() {
-  // Stub for coder — GET /scenarios?teamId=<TEAM_ID>, return data.scenarios
-  // mapped to {id, name, hookId}.
-  throw new Error('NOT_IMPLEMENTED: listExistingScenarios');
+  const resp = await makeApi('GET', `/scenarios?teamId=${TEAM_ID}`, null);
+  const scenarios = (resp && resp.scenarios) || [];
+  return scenarios.map(s => ({
+    id: s.id,
+    name: s.name,
+    hookId: s.hookId || (s.scheduling && s.scheduling.hook) || null,
+  }));
 }
 
 /**
  * Validate a blueprint via Make's validator endpoint. Returns the validator
  * response so the caller can decide whether to proceed.
  * @param {object} blueprint
- * @returns {Promise<{valid: boolean, errors?: Array}>}
+ * @returns {Promise<object>}  validator response (shape depends on Make)
  */
 async function validateBlueprint(blueprint) {
-  // Stub for coder — POST /scenarios/validate-blueprint with {blueprint}.
-  // If MCP `validate_blueprint_schema` is preferred, swap to that here; the
-  // HTTP API path is the same.
-  throw new Error('NOT_IMPLEMENTED: validateBlueprint');
+  return makeApi('POST', '/scenarios/validate-blueprint', { blueprint });
 }
 
 /**
  * Create a scenario from a validated blueprint.
- * @param {{name: string, blueprint: object, scheduling: object}} bp
+ * @param {{name: string, blueprint: object, scheduling: object|null}} bp
  * @returns {Promise<{id: number, hookId: number|null}>}
  */
 async function createScenario(bp) {
-  // Stub for coder — POST /scenarios with body {teamId: TEAM_ID, name,
-  // blueprint, scheduling, confirmed: true}. Returns the new scenario id +
-  // the auto-provisioned hookId (when the blueprint has a CustomWebHook).
-  throw new Error('NOT_IMPLEMENTED: createScenario');
+  const body = {
+    teamId: TEAM_ID,
+    name: bp.name,
+    blueprint: bp.blueprint,
+    confirmed: true,
+  };
+  if (bp.scheduling) body.scheduling = bp.scheduling;
+  const resp = await makeApi('POST', '/scenarios', body);
+  const sc = (resp && resp.scenario) || resp;
+  return {
+    id: sc && sc.id,
+    hookId: sc && (sc.hookId || (sc.scheduling && sc.scheduling.hook)) || null,
+  };
 }
 
 /**
@@ -132,9 +178,10 @@ async function createScenario(bp) {
  * @returns {Promise<string|null>}
  */
 async function getWebhookUrl(hookId) {
-  // Stub for coder — GET /hooks?teamId=<TEAM_ID>, find matching id, return
-  // its `url` field (full https URL). null if not found.
-  throw new Error('NOT_IMPLEMENTED: getWebhookUrl');
+  const resp = await makeApi('GET', `/hooks?teamId=${TEAM_ID}`, null);
+  const hooks = (resp && resp.hooks) || [];
+  const match = hooks.find(h => Number(h.id) === Number(hookId));
+  return (match && match.url) || null;
 }
 
 /**
@@ -143,10 +190,64 @@ async function getWebhookUrl(hookId) {
  * @returns {Promise<{created: Array, skipped: Array, webhookUrl: string|null}>}
  */
 async function provision(opts) {
-  // Stub for coder — orchestrates the workflow described in the file header.
-  // The `webhookUrl` returned is the ub-social-boost webhook (the one Simon
-  // copies into Railway as MAKE_BOOST_WEBHOOK_URL).
-  throw new Error('NOT_IMPLEMENTED: provision');
+  const dryRun = opts && opts.dryRun;
+  const out = { created: [], skipped: [], webhookUrl: null };
+
+  // 1. Read + validate both blueprints up-front so we fail fast on parse
+  //    or validator errors before touching Make.
+  const bps = BLUEPRINTS.map(b => ({
+    expectedName: b.expectedName,
+    bp: readBlueprint(b.file),
+  }));
+
+  for (const item of bps) {
+    if (item.bp.name !== item.expectedName) {
+      throw new Error(`Blueprint name mismatch: file expected '${item.expectedName}', got '${item.bp.name}'`);
+    }
+    console.log(`[provision] validating ${item.expectedName}...`);
+    const validation = await validateBlueprint(item.bp.blueprint);
+    if (validation && validation.valid === false) {
+      const errors = Array.isArray(validation.errors)
+        ? validation.errors.map(e => `- ${JSON.stringify(e)}`).join('\n')
+        : JSON.stringify(validation);
+      throw new Error(`Blueprint ${item.expectedName} failed validation:\n${errors}`);
+    }
+    console.log(`[provision] ${item.expectedName} validated OK`);
+  }
+
+  if (dryRun) {
+    console.log('[provision] dry-run mode — stopping before create');
+    return out;
+  }
+
+  // 2. List existing scenarios to support idempotency.
+  console.log(`[provision] listing existing scenarios on team ${TEAM_ID}...`);
+  const existing = await listExistingScenarios();
+  console.log(`[provision] found ${existing.length} existing scenario(s)`);
+
+  // 3. Create or skip each blueprint.
+  for (const item of bps) {
+    const already = existing.find(s => s.name === item.expectedName);
+    if (already) {
+      console.log(`[provision] SKIP ${item.expectedName} — already exists (id ${already.id})`);
+      out.skipped.push({ name: item.expectedName, id: already.id, hookId: already.hookId });
+      if (item.expectedName === 'ub-social-boost' && already.hookId) {
+        const url = await getWebhookUrl(already.hookId);
+        if (url) out.webhookUrl = url;
+      }
+      continue;
+    }
+    console.log(`[provision] CREATE ${item.expectedName}...`);
+    const created = await createScenario(item.bp);
+    console.log(`[provision] created ${item.expectedName} -> id ${created.id} (hookId ${created.hookId || 'n/a'})`);
+    out.created.push({ name: item.expectedName, id: created.id, hookId: created.hookId });
+    if (item.expectedName === 'ub-social-boost' && created.hookId) {
+      const url = await getWebhookUrl(created.hookId);
+      if (url) out.webhookUrl = url;
+    }
+  }
+
+  return out;
 }
 
 module.exports = {
