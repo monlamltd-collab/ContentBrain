@@ -342,6 +342,39 @@ main {
   border-bottom: none;
 }
 
+/* ── Weekly review section (Phase G-4) ── */
+
+.perf-weekly-review {
+  border-left: 3px solid #d4a017;
+}
+
+.perf-weekly-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.perf-weekly-stats div {
+  background: #faf8f4;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+
+.perf-weekly-stats dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.perf-weekly-stats dd {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1a2b4b;
+}
+
 /* ── Pipeline tab (Phase F-1) ── */
 
 .pipeline-tab .pipeline-header h2 {
