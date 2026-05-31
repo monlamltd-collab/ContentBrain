@@ -1326,12 +1326,15 @@ cron.schedule('*/15 * * * *', async () => {
               await requestBoost(post, result.postId);
             } catch (err) {
               // Phase G-3 — surface boost-hook failures to Telegram so the
-              // operator notices when Make is paused / unreachable. Catch
-              // the sendNotification's own failure too — we never want a
-              // Telegram outage to cascade into the publish loop.
+              // operator notices when Make is paused / unreachable.
+              // Phase G-4 — wrap via alertThrottled so a bursty outage
+              // (10 failures in 15min) sends 3 alerts + 1 summary instead
+              // of 10 separate messages. See .ruflo/phase-g4-design.md §4.3.
               console.warn(`  [boost] hook failed for ${post.id}: ${err.message}`);
               try {
-                await sendNotification(`Boost request failed for post ${post.id}: ${err.message.slice(0, 200)}`);
+                const { alertThrottled } = require('./lib/social-engine/telegram-throttle');
+                await alertThrottled('boost-hook-failed', post.id, () =>
+                  `Boost request failed for post ${post.id}: ${err.message.slice(0, 200)}`);
               } catch (_) { /* swallow — Telegram outage must not break publish */ }
             }
           }
@@ -1348,6 +1351,22 @@ cron.schedule('*/15 * * * *', async () => {
     console.error(`[${new Date().toISOString()}] Cron publish error:`, err.message);
   }
 });
+
+// Phase G-4 — boost_runs stale-pending cleanup. 04:00 UTC daily, well
+// before any other social-engine cron (06:00 reconcile, 06:30 audience,
+// 08:00 learner, 09:00 BST publish). Marks rows pending > 24h as failed
+// with meta.ended_reason='make_no_callback'. See .ruflo/phase-g4-design.md §3.
+cron.schedule('0 4 * * *', async () => {
+  try {
+    const { reconcileStalePending } = require('./lib/social-engine/cleanup');
+    const result = await reconcileStalePending();
+    if (result.aged_out > 0) {
+      console.log(`[${new Date().toISOString()}] Stale-pending cleanup: aged_out=${result.aged_out}`);
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Stale-pending cleanup error:`, err.message);
+  }
+}, { timezone: 'UTC' });
 
 // Phase G-3 — daily audience snapshot cron. 06:30 UTC = strictly AFTER the
 // Make reconcile scenario fires at 06:00 UTC, so PR4's dashboard rows for
