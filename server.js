@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { createLLM } = require('./lib/llm');
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
@@ -1663,9 +1664,6 @@ async function reviseBlogPost(opts) {
     await client.from('blog_posts').update({ revision_feedback: editorText }).eq('id', postId);
   } catch (e) { console.warn(`  revision_feedback save failed: ${e.message}`); }
 
-  const Anthropic = require('@anthropic-ai/sdk');
-  const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-
   const sysPrompt = getVoiceForBrand(brand);
   const baseDomain = brand === 'bridgematch' ? 'bridgematch.co.uk' : 'auctionbrain.co.uk';
 
@@ -1720,7 +1718,7 @@ Return ONLY this JSON (no commentary, no markdown fences):
   "change_note": "One sentence describing what you changed and why"
 }`;
 
-  const resp = await anthropic.messages.create({
+  const resp = await createLLM().messages.create({
     model: 'claude-sonnet-4-5-20250929',
     max_tokens: 8000,
     system: sysPrompt,
@@ -2049,8 +2047,6 @@ async function pollTelegram() {
           }
 
           // Generate caption with Claude
-          const Anthropic = require('@anthropic-ai/sdk');
-          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
           const { brands } = require('./lib/config');
           const b = brands.auctionbrain;
 
@@ -2058,7 +2054,7 @@ async function pollTelegram() {
             ? `The content owner sent a video with this note: "${userCaption}"\n\nWrite a short, engaging Facebook post caption for this video. The brand is ${b.name} (${b.url}) targeting ${b.audience}. Tone: ${b.tone}. British English, no hashtags in the caption. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }`
             : `Write a short, engaging Facebook post caption for a video posted by ${b.name} (${b.url}) targeting ${b.audience}. Tone: ${b.tone}. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }`;
 
-          const response = await anthropic.messages.create({
+          const response = await createLLM().messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 500,
             messages: [{ role: 'user', content: prompt }]
@@ -2114,10 +2110,7 @@ async function pollTelegram() {
           const fs = require('fs');
           const imageData = fs.readFileSync(imgPath).toString('base64');
 
-          const Anthropic = require('@anthropic-ai/sdk');
-          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-
-          const visionResponse = await anthropic.messages.create({
+          const visionResponse = await createLLM().messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 800,
             messages: [{
@@ -2185,12 +2178,10 @@ async function pollTelegram() {
           const sch = pendingSchedule;
           pendingSchedule = null;
           try {
-            const Anthropic = require('@anthropic-ai/sdk');
-            const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
             const nowIso = new Date().toISOString();
             const dayName = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
-            const parseResp = await anthropic.messages.create({
+            const parseResp = await createLLM().messages.create({
               model: 'claude-haiku-4-5-20251001',
               max_tokens: 200,
               messages: [{ role: 'user', content: `Parse this scheduling request into an ISO 8601 timestamp.
@@ -2334,108 +2325,58 @@ or
               await sb.from('posts').update({ rejection_feedback: text }).eq('id', rev.postId);
             } catch (e) { console.warn(`  rejection_feedback save failed: ${e.message}`); }
 
-            const Anthropic = require('@anthropic-ai/sdk');
-            const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
             const { brands } = require('./lib/config');
             const b = brands[post.brand] || brands.auctionbrain;
 
-            // Step 1: Classify the feedback — what kind of change is needed?
-            const classifyResponse = await anthropic.messages.create({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 300,
-              messages: [{ role: 'user', content: `You manage a social media content pipeline. A post has a graphic/video and this copy:
+            // Step 1: Interpret the edit request — what needs changing?
+                        const classifyResponse = await createLLM().messages.create({
+                          max_tokens: 300,
+                          messages: [{ role: 'user', content: `You manage a social media content pipeline. A post has this copy:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\nType: ${post.template_type}\n\nThe content owner sent this edit request: "${text}"\n\nClassify this request. Return JSON:\n{\n  "type": "copy_change" | "cannot_do",\n  "summary": "One line explaining what you understood they want",\n  "copy_instructions": "Specific instructions for rewriting the copy — the exact changes requested, or null"\n}` }]
+                        });
 
-Headline: ${post.copy_headline}
-Body: ${post.copy_body}
-CTA: ${post.copy_cta}
-Template: ${post.template_type}
-Has video: ${!!post.video_url}
+                        const classText = classifyResponse.content[0].text;
+                        const classMatch = classText.match(/\{[\\s\\S]*\}/);
+                        if (!classMatch) throw new Error('Could not interpret feedback');
+                        const classification = JSON.parse(classMatch[0]);
 
-The content owner sent this revision request: "${text}"
+                        console.log(`[Telegram] Revision classified: ${classification.type} — ${classification.summary}`);
+                        await sendNotification(`Understood: ${classification.summary}`);
 
-Classify this request. Return JSON:
-{
-  "type": "copy_change" | "video_change" | "both" | "cannot_do",
-  "copy_action": "rewrite" | "none",
-  "video_action": "re-render" | "extend_duration" | "none",
-  "video_duration_seconds": null or number if they specified a duration,
-  "summary": "One line explaining what you understood they want",
-  "copy_instructions": "Specific instructions for rewriting copy, or null"
-}` }]
-            });
+                        if (classification.type === 'cannot_do') {
+                          await sendNotification(`Can't action that request: ${classification.summary}. Try phrasing it differently.`);
+                          continue;
+                        }
 
-            const classText = classifyResponse.content[0].text;
-            const classMatch = classText.match(/\{[\s\S]*\}/);
-            if (!classMatch) throw new Error('Could not interpret feedback');
-            const classification = JSON.parse(classMatch[0]);
+                        let revised = { copy_headline: post.copy_headline, copy_body: post.copy_body, copy_cta: post.copy_cta };
 
-            console.log(`[Telegram] Revision classified: ${classification.type} — ${classification.summary}`);
-            await sendNotification(`Understood: ${classification.summary}`);
+                        // Step 2: Rewrite the copy
+                        const copyInstructions = classification.copy_instructions || text;
+                        const copyResponse = await createLLM().messages.create({
+                          max_tokens: 500,
+                          messages: [{ role: 'user', content: `You manage social posts for ${b.name}. Current copy:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nEdit request: ${copyInstructions}\n\nRewrite to match the request. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
+                        });
 
-            let revised = { copy_headline: post.copy_headline, copy_body: post.copy_body, copy_cta: post.copy_cta };
-            let needsVideoRerender = false;
-            let videoDuration = null;
+                        const aiText = copyResponse.content[0].text;
+                        const match = aiText.match(/\{[\\s\\S]*\}/);
+                        if (match) revised = JSON.parse(match[0]);
 
-            // Step 2: Handle copy changes
-            if (classification.copy_action === 'rewrite') {
-              const copyInstructions = classification.copy_instructions || text;
-              const copyResponse = await anthropic.messages.create({
-                model: 'claude-haiku-4-5-20251001',
-                max_tokens: 500,
-                messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nRevision needed: ${copyInstructions}\n\nRewrite the post. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
-              });
+                        // Apply copy changes to DB
+                        const { supabase } = require('./lib/supabase');
+                        const { error: copyErr } = await supabase.from('posts').update({
+                          copy_headline: revised.copy_headline,
+                          copy_body: revised.copy_body || '',
+                          copy_cta: revised.copy_cta || ''
+                        }).eq('id', rev.postId);
+                        if (copyErr) throw new Error(`Copy update failed: ${copyErr.message}`);
 
-              const aiText = copyResponse.content[0].text;
-              const match = aiText.match(/\{[\s\S]*\}/);
-              if (match) revised = JSON.parse(match[0]);
-            }
-
-            // Step 3: Handle video changes
-            if (classification.video_action === 'extend_duration' || classification.video_action === 're-render') {
-              needsVideoRerender = true;
-              videoDuration = classification.video_duration_seconds || 30;
-            }
-
-            // Apply copy changes
-            const { supabase } = require('./lib/supabase');
-            const { error: copyErr } = await supabase.from('posts').update({
-              copy_headline: revised.copy_headline,
-              copy_body: revised.copy_body || '',
-              copy_cta: revised.copy_cta || ''
-            }).eq('id', rev.postId);
-            if (copyErr) throw new Error(`Copy update failed: ${copyErr.message}`);
-
-            // Re-render video if needed
-            if (needsVideoRerender && post.video_url) {
-              try {
-                await sendNotification(`Re-rendering video (${videoDuration}s)...`);
-                const { renderVideo, ensureBundle } = require('./lib/video-renderer');
-                await ensureBundle();
-
-                const updatedPost = {
-                  ...post,
-                  ...revised,
-                  overrideDurationSeconds: videoDuration,
-                };
-                const video = await renderVideo(post.template_type, post.brand, updatedPost);
-
-                await supabase.from('posts').update({ video_url: video.filename }).eq('id', rev.postId);
-                post.video_url = video.filename;
-                console.log(`[Telegram] Re-rendered video: ${video.filename} (${videoDuration}s)`);
-              } catch (videoErr) {
-                console.error(`[Telegram] Video re-render failed: ${videoErr.message}`);
-                await sendNotification(`Video re-render failed: ${videoErr.message}. Copy was updated.`);
-              }
-            }
-
-            // Send revised post for review
-            await sendPostForReview({ ...post, ...revised });
-            console.log(`[Telegram] Post ${rev.postId} revised (${classification.type})`);
-          } catch (err) {
-            console.error(`[Telegram] Revision error: ${err.message}`);
-            await sendNotification(`Revision failed: ${err.message}`);
-          }
-          continue;
+                        // Send revised post back for review
+                        await sendPostForReview({ ...post, ...revised });
+                        console.log(`[Telegram] Post ${rev.postId} revised (${classification.type})`);
+                      } catch (err) {
+                        console.error(`[Telegram] Revision error: ${err.message}`);
+                        await sendNotification(`Revision failed: ${err.message}`);
+                      }
+                      continue;
         }
 
         // Handle pending brief conversation
@@ -2456,10 +2397,8 @@ Classify this request. Return JSON:
           // After 2 messages from user (initial + follow-up), extract and save
           if (pendingBrief.messages.length >= 2) {
             try {
-              const Anthropic = require('@anthropic-ai/sdk');
-              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
-              const extractResponse = await anthropic.messages.create({
+              const extractResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 400,
                 messages: [{ role: 'user', content: `The content owner briefed a social media post across these messages:\n${pendingBrief.messages.map((m, i) => `Message ${i + 1}: "${m}"`).join('\n')}\n\nExtract a structured brief. Return JSON:\n{\n  "topic": "2-5 word topic summary",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "angle": "The specific angle or hook to take",\n  "data_points": "Any stats, facts, or stories mentioned, or null",\n  "full_brief": "A single paragraph combining all the info into a clear content brief"\n}` }]
@@ -2489,10 +2428,8 @@ Classify this request. Return JSON:
           } else {
             // Ask one follow-up question
             try {
-              const Anthropic = require('@anthropic-ai/sdk');
-              const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
-              const followUpResponse = await anthropic.messages.create({
+              const followUpResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 150,
                 messages: [{ role: 'user', content: `You are ContentBrain. The content owner wants to brief a future social media post.\n\nThey said: "${pendingBrief.messages.join(' ')}"\n\nAsk ONE short follow-up question to make this brief more actionable. Focus on: what angle or hook? Any specific data points or stories to include? Which brand (AuctionBrain or BridgeMatch)?\n\nKeep it casual, one sentence. British English.` }]
@@ -2710,8 +2647,6 @@ Classify this request. Return JSON:
 
         // Smart intent classification — route message to the right action
         try {
-          const Anthropic = require('@anthropic-ai/sdk');
-          const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
           // Get recent drafts for context
           const recentDrafts = await getDraftPosts().catch(() => []);
@@ -2721,7 +2656,7 @@ Classify this request. Return JSON:
 
           addToHistory('user', text);
 
-          const intentResponse = await anthropic.messages.create({
+          const intentResponse = await createLLM().messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 400,
             messages: [{ role: 'user', content: `You are ContentBrain, a friendly social media content assistant on Telegram. You manage content generation and publishing for the owner's brands.
@@ -2800,7 +2735,7 @@ Guidelines:
             const { brands } = require('./lib/config');
             const b = brands[post.brand] || brands.auctionbrain;
 
-            const classifyResponse = await anthropic.messages.create({
+            const classifyResponse = await createLLM().messages.create({
               model: 'claude-haiku-4-5-20251001',
               max_tokens: 300,
               messages: [{ role: 'user', content: `You manage a social media content pipeline. A post has a graphic/video and this copy:
@@ -2837,7 +2772,7 @@ Classify this request. Return JSON:
 
             if (classification.copy_action === 'rewrite') {
               const copyInstructions = classification.copy_instructions || text;
-              const copyResponse = await anthropic.messages.create({
+              const copyResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 500,
                 messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nRevision needed: ${copyInstructions}\n\nRewrite the post. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
@@ -2885,7 +2820,7 @@ Classify this request. Return JSON:
             // Start conversational brief — ask a follow-up before saving
             pendingBrief = { messages: [text], startedAt: Date.now() };
             try {
-              const followUpResponse = await anthropic.messages.create({
+              const followUpResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 150,
                 messages: [{ role: 'user', content: `You are ContentBrain. The content owner wants to brief a future social media post.\n\nThey said: "${text}"\n\nAsk ONE short follow-up question to make this brief more actionable. Focus on: what angle or hook? Any specific data points or stories to include? Which brand (AuctionBrain or BridgeMatch)?\n\nKeep it casual, one sentence. British English.` }]
@@ -2904,7 +2839,7 @@ Classify this request. Return JSON:
           } else if (intent.action === 'save_seed') {
             // Save as content seed — raw material, not a direct brief
             try {
-              const seedResponse = await anthropic.messages.create({
+              const seedResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 400,
                 messages: [{ role: 'user', content: `The content owner shared this knowledge/research:\n"${text}"\n\nExtract structured content seed. Return JSON:\n{\n  "summary": "One-line summary",\n  "key_points": "3-5 bullet points of useful info",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "tags": ["tag1", "tag2"]\n}` }]
@@ -3018,7 +2953,7 @@ Classify this request. Return JSON:
               }
 
               // Summarise with Claude
-              const scrapeResponse = await anthropic.messages.create({
+              const scrapeResponse = await createLLM().messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 600,
                 messages: [{ role: 'user', content: `Summarise this article content for a UK property content team. Source URL: ${urlToScrape}\n\nContent:\n${pageContent.slice(0, 6000)}\n\nReturn JSON:\n{\n  "summary": "One-line summary",\n  "key_points": "3-5 bullet points of the most useful info",\n  "brand": "auctionbrain" or "bridgematch" or null,\n  "tags": ["tag1", "tag2"]\n}` }]
@@ -3119,8 +3054,7 @@ async function resendDraftReviewCards() {
 
 // ── EDITORIAL DASHBOARD ──────────────────────────────────────────────────────
 
-const Anthropic = require('@anthropic-ai/sdk');
-const _anthropicForEditorial = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY });
+const _llmForEditorial = createLLM();
 const SUPPORTED_IMAGE_TYPES_ED = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
 app.get('/content', requireAuth, (req, res) => {
@@ -3234,7 +3168,7 @@ app.post('/api/content/upload', requireAuth, async (req, res) => {
       ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } }
       : { type: 'image', source: { type: 'base64', media_type: mimeType, data } };
 
-    const response = await _anthropicForEditorial.messages.create({
+    const response = await _llmForEditorial.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 4000,
       messages: [{
@@ -3608,9 +3542,7 @@ The operator wants a new pattern based on this rough idea:
 
 Write ONE new pattern in the existing format. Output the pattern body only.`;
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await createLLM().messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 250,
       system,
