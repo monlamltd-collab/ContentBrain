@@ -8,3 +8,6 @@ LOGOS/
 .tmp/
 .ruflo/
 ruvector.db
+
+# Never commit example env files — they may contain real keys
+.env.example
