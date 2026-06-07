@@ -1,4 +1,4 @@
-// Outbound generator — mock the Anthropic SDK and assert:
+// Outbound generator — mock lib/llm (not the Anthropic SDK) and assert:
 //   - filter retry loop runs up to 3 times total
 //   - throws with block reasons when retries exhausted
 //   - per-track persona is reflected in the system prompt
@@ -7,50 +7,59 @@ const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const GEN_PATH = require.resolve('../../lib/generate-outbound');
-const SDK_PATH = require.resolve('@anthropic-ai/sdk');
+const LLM_PATH = require.resolve('../../lib/llm');
 const RUNTIME_CFG_PATH = require.resolve('../../lib/runtime-config');
+const FUNDED_DEALS_PATH = require.resolve('../../lib/closed-loop/funded-deals');
 
-// ── Mock Anthropic SDK ───────────────────────────────────────────────────
+// ── Mock lib/llm ──────────────────────────────────────────────────────────
 
 let nextResponses = []; // queue of strings to return as content[0].text
 let lastCallArgs = [];
 
-class MockAnthropic {
-  constructor(opts) {
-    this.opts = opts;
-    this.messages = {
-      create: async (args) => {
-        lastCallArgs.push(args);
-        if (!nextResponses.length) {
-          throw new Error('Mock Anthropic ran out of queued responses');
-        }
-        const text = nextResponses.shift();
-        return { content: [{ type: 'text', text }] };
+function makeMockLLM() {
+  return {
+    createLLM: () => ({
+      messages: {
+        create: async (args) => {
+          lastCallArgs.push(args);
+          if (!nextResponses.length) {
+            throw new Error('Mock LLM ran out of queued responses');
+          }
+          const text = nextResponses.shift();
+          return { content: [{ type: 'text', text }] };
+        },
       },
-    };
-  }
+    }),
+    createClaudeLLM: () => ({ messages: { create: async () => ({ content: [] }) } }),
+    MODEL: 'test-llm-model',
+    CLAUDE_MODEL: 'test-claude-model',
+  };
 }
 
 function loadGeneratorFresh() {
   delete require.cache[GEN_PATH];
-  delete require.cache[SDK_PATH];
+  delete require.cache[LLM_PATH];
   delete require.cache[RUNTIME_CFG_PATH];
+  delete require.cache[FUNDED_DEALS_PATH];
 
-  // Inject mock SDK
-  require.cache[SDK_PATH] = {
-    id: SDK_PATH,
-    filename: SDK_PATH,
-    loaded: true,
-    exports: MockAnthropic,
+  // Inject mock lib/llm
+  require.cache[LLM_PATH] = {
+    id: LLM_PATH, filename: LLM_PATH, loaded: true,
+    exports: makeMockLLM(),
   };
 
   // Inject a fake runtime-config so getOutboundTone returns null without
   // hitting Supabase.
   require.cache[RUNTIME_CFG_PATH] = {
-    id: RUNTIME_CFG_PATH,
-    filename: RUNTIME_CFG_PATH,
-    loaded: true,
+    id: RUNTIME_CFG_PATH, filename: RUNTIME_CFG_PATH, loaded: true,
     exports: { loadAllLevers: async () => [] },
+  };
+
+  // Stub funded-deals to avoid Supabase calls (error is non-fatal, but
+  // avoids noisy warnings in test output).
+  require.cache[FUNDED_DEALS_PATH] = {
+    id: FUNDED_DEALS_PATH, filename: FUNDED_DEALS_PATH, loaded: true,
+    exports: { getProspectOutcomes: async () => [] },
   };
 
   return require('../../lib/generate-outbound');

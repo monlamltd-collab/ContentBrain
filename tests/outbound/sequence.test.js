@@ -125,7 +125,14 @@ function loadSequenceFresh() {
     },
   };
 
-  return require('../../lib/sequence');
+  const seq = require('../../lib/sequence');
+  // sequence.js calls require('dotenv').config() on load, which re-populates
+  // TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID from .env even after beforeEach
+  // deletes them.  Clear them here so sendOutboundForReview is a no-op for
+  // the entire test that follows.
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_CHAT_ID;
+  return seq;
 }
 
 beforeEach(() => {

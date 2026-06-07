@@ -1,8 +1,8 @@
 // Phase G — copy.js filter-retry loop coverage.
 //
-// Mock the Anthropic SDK + runtime-config + themes so the copywriter can be
-// exercised without external dependencies. Asserts:
-//   - first attempt clean → returns, single SDK call
+// Mock lib/llm (not the Anthropic SDK) + runtime-config + themes so the
+// copywriter can be exercised without external dependencies. Asserts:
+//   - first attempt clean → returns, single LLM call
 //   - filter block on attempt 1 → retries, succeeds on attempt 2
 //   - all attempts blocked → throws with .blocks attached
 //   - JSON parse error → regen hint includes 'Return ONLY the JSON object'
@@ -15,7 +15,7 @@ const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const COPY_PATH = require.resolve('../../lib/social-engine/copy');
-const SDK_PATH = require.resolve('@anthropic-ai/sdk');
+const LLM_PATH = require.resolve('../../lib/llm');
 const RUNTIME_CFG_PATH = require.resolve('../../lib/runtime-config');
 const THEMES_PATH = require.resolve('../../lib/themes');
 const LOT_CONTENT_PATH = require.resolve('../../lib/lot-content');
@@ -27,32 +27,35 @@ let lastLotContentArgs = null;
 let lotContentResponse = null;
 let lastFilterCalls = []; // every runFilters call
 
-class MockAnthropic {
-  constructor() {
-    this.messages = {
-      create: async (args) => {
-        lastCallArgs.push(args);
-        if (!nextResponses.length) throw new Error('Mock Anthropic ran out of queued responses');
-        const text = nextResponses.shift();
-        return { content: [{ type: 'text', text }] };
+function makeMockLLM() {
+  return {
+    createLLM: () => ({
+      messages: {
+        create: async (args) => {
+          lastCallArgs.push(args);
+          if (!nextResponses.length) throw new Error('Mock LLM ran out of queued responses');
+          const text = nextResponses.shift();
+          return { content: [{ type: 'text', text }] };
+        },
       },
-    };
-  }
+    }),
+    createClaudeLLM: () => ({ messages: { create: async () => ({ content: [] }) } }),
+    MODEL: 'test-llm-model',
+    CLAUDE_MODEL: 'test-claude-model',
+  };
 }
 
 function loadCopyFresh() {
   delete require.cache[COPY_PATH];
-  delete require.cache[SDK_PATH];
+  delete require.cache[LLM_PATH];
   delete require.cache[RUNTIME_CFG_PATH];
   delete require.cache[THEMES_PATH];
   delete require.cache[LOT_CONTENT_PATH];
   delete require.cache[FILTERS_PATH];
 
-  require.cache[SDK_PATH] = {
-    id: SDK_PATH,
-    filename: SDK_PATH,
-    loaded: true,
-    exports: MockAnthropic,
+  require.cache[LLM_PATH] = {
+    id: LLM_PATH, filename: LLM_PATH, loaded: true,
+    exports: makeMockLLM(),
   };
 
   require.cache[RUNTIME_CFG_PATH] = {

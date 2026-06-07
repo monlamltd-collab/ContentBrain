@@ -1,4 +1,4 @@
-// classify.js — mock the Anthropic SDK + assert:
+// classify.js — mock lib/llm (not the Anthropic SDK) and assert:
 //   - all 8 intents pass through validation
 //   - garbage / invalid JSON / out-of-enum intent → fallback questions/0.5
 //   - confidence < 0.6 forces requires_human=true and telegram_alert=true
@@ -8,36 +8,40 @@ const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const CLASSIFY_PATH = require.resolve('../../lib/classify');
-const SDK_PATH = require.resolve('@anthropic-ai/sdk');
+const LLM_PATH = require.resolve('../../lib/llm');
 
 let nextResponses = [];
 let lastCallArgs = [];
 
-class MockAnthropic {
-  constructor(opts) {
-    this.opts = opts;
-    this.messages = {
-      create: async (args) => {
-        lastCallArgs.push(args);
-        if (!nextResponses.length) {
-          throw new Error('Mock Anthropic ran out of queued responses');
-        }
-        const text = nextResponses.shift();
-        return { content: [{ type: 'text', text }] };
+function makeMockLLM() {
+  return {
+    createLLM: () => ({
+      messages: {
+        create: async (args) => {
+          lastCallArgs.push(args);
+          if (!nextResponses.length) {
+            throw new Error('Mock LLM ran out of queued responses');
+          }
+          const text = nextResponses.shift();
+          return { content: [{ type: 'text', text }] };
+        },
       },
-    };
-  }
+    }),
+    createClaudeLLM: () => ({ messages: { create: async () => ({ content: [] }) } }),
+    MODEL: 'test-llm-model',
+    CLAUDE_MODEL: 'test-claude-model',
+  };
 }
 
 function loadClassifyFresh() {
   delete require.cache[CLASSIFY_PATH];
-  delete require.cache[SDK_PATH];
+  delete require.cache[LLM_PATH];
 
-  require.cache[SDK_PATH] = {
-    id: SDK_PATH,
-    filename: SDK_PATH,
+  require.cache[LLM_PATH] = {
+    id: LLM_PATH,
+    filename: LLM_PATH,
     loaded: true,
-    exports: MockAnthropic,
+    exports: makeMockLLM(),
   };
 
   return require('../../lib/classify');
@@ -46,7 +50,7 @@ function loadClassifyFresh() {
 beforeEach(() => {
   nextResponses = [];
   lastCallArgs = [];
-  process.env.CLAUDE_API_KEY = 'test-key';
+  process.env.OPENROUTER_API_KEY = 'test-key';
 });
 
 // ── classifyReply — 8 intents ────────────────────────────────────────────
@@ -104,12 +108,11 @@ test('classifyReply: empty body returns questions/0.5 without an API call', asyn
   const res = await classifyReply({ body: '' });
   assert.equal(res.intent, 'questions');
   assert.equal(res.confidence, 0.5);
-  assert.equal(lastCallArgs.length, 0, 'should NOT call Anthropic for empty body');
+  assert.equal(lastCallArgs.length, 0, 'should NOT call LLM for empty body');
 });
 
-test('classifyReply: Anthropic API error falls back to questions/0.5', async () => {
-  // Queue a "response" that triggers the mock's throw branch — empty array
-  // makes the next dequeue throw inside the mock.
+test('classifyReply: LLM error falls back to questions/0.5', async () => {
+  // empty nextResponses causes mock to throw
   nextResponses = [];
   const { classifyReply } = loadClassifyFresh();
   const res = await classifyReply({ body: 'something' });
@@ -140,15 +143,16 @@ test('classifyReply: confidence < 0 is clamped to 0', async () => {
   assert.equal(res.confidence, 0);
 });
 
-// ── URL / key plumbing ──────────────────────────────────────────────────
+// ── LLM plumbing ──────────────────────────────────────────────────────
 
-test('classifyReply: uses CLAUDE_API_KEY env var and the Haiku model', async () => {
+test('classifyReply: calls LLM with the MODEL constant from classify.js', async () => {
   nextResponses = [JSON.stringify({ intent: 'interested', confidence: 0.9, reasoning: 'x' })];
   const { classifyReply, MODEL } = loadClassifyFresh();
   await classifyReply({ body: 'hi' });
   assert.equal(lastCallArgs.length, 1);
-  assert.equal(lastCallArgs[0].model, MODEL, 'should call the Haiku model constant');
-  assert.match(MODEL, /haiku/, 'MODEL constant should be a haiku model');
+  assert.equal(lastCallArgs[0].model, MODEL, 'should call the LLM with its MODEL constant');
+  assert.equal(typeof MODEL, 'string');
+  assert.ok(MODEL.length > 0, 'MODEL should be non-empty');
 });
 
 // ── lookupAction — per-intent table ─────────────────────────────────────
@@ -234,12 +238,10 @@ test('lookupAction: complaint → domain suppression + pause + flip_siblings', (
 
 test('lookupAction: confidence < 0.6 forces requires_human + telegram_alert', () => {
   const { lookupAction } = loadClassifyFresh();
-  // not_interested would normally be requires_human=false / no telegram.
   const a = lookupAction('not_interested', 0.4);
   assert.equal(a.requires_human, true, 'low conf should force human');
   assert.equal(a.telegram_alert, true, 'low conf should force telegram');
   assert.equal(a.low_confidence, true);
-  // Other fields preserved
   assert.equal(a.sequence_action, 'complete');
 });
 
