@@ -1586,7 +1586,9 @@ let pollCount = 0;
 let pollLastError = null;
 let pendingRevision = null; // { postId, messageId, chatId, contentType?, brand? }
 let pendingSchedule = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption? }
-let pendingRejection = null; // { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption?, contentType? }
+// Queue (not single variable) — rapid-reject of multiple posts no longer overwrites.
+// Each entry: { type: 'social'|'blog'|'guide', postId, chatId, messageId, brand?, originalCaption?, contentType? }
+let pendingRejectionQueue = [];
 let pendingBrief = null; // { messages: [], startedAt: number }
 
 // ── CHAT MEMORY ──
@@ -1847,10 +1849,11 @@ async function pollTelegram() {
           }
 
           if (rvId && rvAction === 'reject') {
-            // Don't reject immediately — ask for a reason first so future
-            // generations can avoid the same failure mode. The text-message
-            // handler below sees pendingRejection and processes the reply.
-            pendingRejection = {
+            // Push to queue — rapid multi-reject no longer overwrites the first.
+            // Only prompt for a reason when the queue was empty (i.e. this is the
+            // first pending rejection); subsequent ones prompt after each answer.
+            const wasEmpty = pendingRejectionQueue.length === 0;
+            pendingRejectionQueue.push({
               type: contentType,
               postId: rvId,
               chatId: cb.message.chat.id,
@@ -1858,9 +1861,11 @@ async function pollTelegram() {
               brand,
               contentType,
               originalCaption: cb.message?.caption || cb.message?.text || ''
-            };
+            });
             await answerCallback(cb.id, 'Why?');
-            await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+            if (wasEmpty) {
+              await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+            }
             console.log(`[Telegram] Rejection reason requested for ${brand} ${contentType} ${rvId}`);
           }
 
@@ -1943,15 +1948,18 @@ async function pollTelegram() {
           // text-message handler downstream already updates posts.status='rejected'
           // with the captured feedback. Outbound posts share the posts table
           // so the existing branch handles them.
-          pendingRejection = {
+          const wasEmptyOutbound = pendingRejectionQueue.length === 0;
+          pendingRejectionQueue.push({
             type: 'social', // reuses the social rejection branch (posts table)
             postId,
             chatId: cb.message.chat.id,
             messageId: cb.message.message_id,
             originalCaption: cb.message?.caption || cb.message?.text || ''
-          };
+          });
           await answerCallback(cb.id, 'Why?');
-          await sendNotification("Why are you rejecting this outbound message? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          if (wasEmptyOutbound) {
+            await sendNotification("Why are you rejecting this outbound message? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          }
           console.log(`[Telegram] Outbound rejection reason requested for ${postId}`);
           continue;
         }
@@ -1972,15 +1980,18 @@ async function pollTelegram() {
         if (postId && action === 'reject') {
           // Same as blog/guide reject — capture a reason so future generation
           // learns from this failure mode. Text-message handler processes the reply.
-          pendingRejection = {
+          const wasEmptySocial = pendingRejectionQueue.length === 0;
+          pendingRejectionQueue.push({
             type: 'social',
             postId,
             chatId: cb.message.chat.id,
             messageId: cb.message.message_id,
             originalCaption: cb.message?.caption || cb.message?.text || ''
-          };
+          });
           await answerCallback(cb.id, 'Why?');
-          await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          if (wasEmptySocial) {
+            await sendNotification("Why are you rejecting this? A sentence or two helps the next round avoid the same mistake.\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.");
+          }
           console.log(`[Telegram] Rejection reason requested for social ${postId}`);
         }
 
@@ -2248,9 +2259,8 @@ or
         // edit feedback — it's the editor's voice either way) and finalise the
         // status to 'rejected'. The reason gets surfaced to the LLM next time it
         // generates a post in the same cluster, so future drafts learn from this.
-        if (pendingRejection && !text.startsWith('/')) {
-          const rej = pendingRejection;
-          pendingRejection = null;
+        if (pendingRejectionQueue.length > 0 && !text.startsWith('/')) {
+          const rej = pendingRejectionQueue.shift();
           const reason = text.trim().toLowerCase() === 'skip' ? null : text.trim();
           try {
             const stamp = reason
@@ -2276,12 +2286,20 @@ or
             try {
               await removeButtons(rej.chatId, rej.messageId, stamp);
             } catch {}
-            await sendNotification(reason
+            const remaining = pendingRejectionQueue.length;
+            const doneMsg = reason
               ? `Rejected. Feedback captured — the next ${rej.contentType || rej.type} draft will avoid this.`
-              : 'Rejected (no feedback).');
-            console.log(`[Telegram] ${rej.type} ${rej.postId} rejected${reason ? ' with feedback' : ''}`);
+              : 'Rejected (no feedback).';
+            if (remaining > 0) {
+              await sendNotification(`${doneMsg}\n\n<b>${remaining} more pending.</b> Why are you rejecting the next one?\n\nReply with your reason, or send <i>'skip'</i> to reject without feedback.`);
+            } else {
+              await sendNotification(doneMsg);
+            }
+            console.log(`[Telegram] ${rej.type} ${rej.postId} rejected${reason ? ' with feedback' : ''} (${remaining} remaining in queue)`);
           } catch (err) {
             console.error(`[Telegram] Reject error: ${err.message}`);
+            // Keep the queue intact — don't shift on error so the user can retry
+            pendingRejectionQueue.unshift(rej);
             await sendNotification(`Couldn't save the rejection: ${err.message}. Try clicking Reject again.`);
           }
           continue;
