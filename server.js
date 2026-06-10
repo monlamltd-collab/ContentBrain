@@ -1820,6 +1820,14 @@ async function pollTelegram() {
 
           if (rvId && rvAction === 'approve') {
             try {
+              // Idempotency guard — double-click or replayed update must not
+              // re-approve (and must not create a duplicate cross-pollinate seed).
+              const existing = await getBlogPostById(rvId, brand).catch(() => null);
+              if (existing && existing.status && existing.status !== 'draft') {
+                await answerCallback(cb.id, `Already ${existing.status}`);
+                continue;
+              }
+
               await updateBlogPostStatus(rvId, 'approved', {}, brand);
               const originalCaption = cb.message?.caption || cb.message?.text || '';
               await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\nAPPROVED`);
@@ -1851,6 +1859,11 @@ async function pollTelegram() {
             // Push to queue — rapid multi-reject no longer overwrites the first.
             // Only prompt for a reason when the queue was empty (i.e. this is the
             // first pending rejection); subsequent ones prompt after each answer.
+            // Dedupe: a double-click on the same post must not queue it twice.
+            if (pendingRejectionQueue.some(r => r.postId === rvId)) {
+              await answerCallback(cb.id, 'Already queued — reply with your reason');
+              continue;
+            }
             const wasEmpty = pendingRejectionQueue.length === 0;
             pendingRejectionQueue.push({
               type: contentType,
@@ -1911,6 +1924,12 @@ async function pollTelegram() {
             const { publish } = require('./lib/publish');
             const post = await getPostById(postId);
             if (!post) throw new Error(`post ${postId} not found`);
+            // Idempotency guard — a double-click or replayed update here would
+            // SEND A DUPLICATE EMAIL to a prospect. Only drafts may proceed.
+            if (post.status && post.status !== 'draft') {
+              await answerCallback(cb.id, `Already ${post.status} — no email sent`);
+              continue;
+            }
             await updatePostStatus(postId, 'approved');
             // Re-read post so the publish path sees status=approved + the
             // meta we approved on.
@@ -1947,6 +1966,10 @@ async function pollTelegram() {
           // text-message handler downstream already updates posts.status='rejected'
           // with the captured feedback. Outbound posts share the posts table
           // so the existing branch handles them.
+          if (pendingRejectionQueue.some(r => r.postId === postId)) {
+            await answerCallback(cb.id, 'Already queued — reply with your reason');
+            continue;
+          }
           const wasEmptyOutbound = pendingRejectionQueue.length === 0;
           pendingRejectionQueue.push({
             type: 'social', // reuses the social rejection branch (posts table)
@@ -1965,6 +1988,12 @@ async function pollTelegram() {
 
         if (postId && action === 'approve') {
           try {
+            // Idempotency guard — double-click must not re-approve.
+            const existing = await getPostById(postId).catch(() => null);
+            if (existing && existing.status && existing.status !== 'draft') {
+              await answerCallback(cb.id, `Already ${existing.status}`);
+              continue;
+            }
             await updatePostStatus(postId, 'approved');
             const originalCaption = cb.message?.caption || cb.message?.text || '';
             await removeButtons(cb.message.chat.id, cb.message.message_id, `${originalCaption}\n\nAPPROVED`);
@@ -1979,6 +2008,10 @@ async function pollTelegram() {
         if (postId && action === 'reject') {
           // Same as blog/guide reject — capture a reason so future generation
           // learns from this failure mode. Text-message handler processes the reply.
+          if (pendingRejectionQueue.some(r => r.postId === postId)) {
+            await answerCallback(cb.id, 'Already queued — reply with your reason');
+            continue;
+          }
           const wasEmptySocial = pendingRejectionQueue.length === 0;
           pendingRejectionQueue.push({
             type: 'social',
@@ -2283,6 +2316,15 @@ or
 
             if (rej.type === 'social') {
               const { supabase } = require('./lib/supabase');
+              // Idempotency — already rejected (replayed update)? Acknowledge and move on.
+              const { data: cur } = await supabase.from('posts').select('status').eq('id', rej.postId).maybeSingle();
+              if (cur && cur.status === 'rejected') {
+                const left = pendingRejectionQueue.length;
+                await sendNotification(left > 0
+                  ? `Already rejected — skipping. <b>${left} more pending</b> — why are you rejecting the next one?`
+                  : 'Already rejected — skipping.');
+                continue;
+              }
               const { error } = await supabase.from('posts').update({
                 status: 'rejected',
                 rejection_feedback: reason,
