@@ -296,6 +296,22 @@ main {
   color: #1a2b4b;
 }
 
+/* ── Audience growth sparkline (PR4) ── */
+.perf-audience-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.perf-audience-row svg {
+  color: #1a6b3c;
+  flex-shrink: 0;
+}
+
+.perf-delta-up { color: #1a6b3c; }
+.perf-delta-down { color: #b03030; }
+
 .perf-top3 {
   list-style: decimal;
   padding-left: 22px;

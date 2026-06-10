@@ -402,3 +402,68 @@ test('renderWeeklyReview: missing wr arg returns empty string (defensive)', () =
   assert.equal(renderWeeklyReview(null), '');
   assert.equal(renderWeeklyReview(undefined), '');
 });
+
+// ── renderAudienceSection (PR4 sparkline) ─────────────────────────────────
+
+test('renderAudienceSection: renders SVG sparkline with start/now/change', () => {
+  const { renderAudienceSection } = loadPerfFresh();
+  const series = [
+    { recorded_at: '2026-05-11', followers_count: 100 },
+    { recorded_at: '2026-05-18', followers_count: 130 },
+    { recorded_at: '2026-05-25', followers_count: 180 },
+  ];
+  const html = renderAudienceSection(series);
+  assert.ok(/Audience growth/.test(html));
+  assert.ok(/<svg /.test(html));
+  assert.ok(/<polyline /.test(html));
+  assert.ok(/100/.test(html), 'start value shown');
+  assert.ok(/180/.test(html), 'now value shown');
+  assert.ok(/\+80/.test(html), 'positive delta with + sign');
+  assert.ok(/perf-delta-up/.test(html));
+});
+
+test('renderAudienceSection: negative delta gets down class', () => {
+  const { renderAudienceSection } = loadPerfFresh();
+  const html = renderAudienceSection([
+    { recorded_at: '2026-05-11', followers_count: 200 },
+    { recorded_at: '2026-05-25', followers_count: 150 },
+  ]);
+  assert.ok(/perf-delta-down/.test(html));
+  assert.ok(/-50/.test(html));
+});
+
+test('renderAudienceSection: empty or single-point series renders nothing', () => {
+  const { renderAudienceSection } = loadPerfFresh();
+  assert.equal(renderAudienceSection([]), '');
+  assert.equal(renderAudienceSection(null), '');
+  assert.equal(renderAudienceSection([{ recorded_at: '2026-05-11', followers_count: 100 }]), '');
+});
+
+test('renderPerformanceFragment includes audience section when series present', () => {
+  const { renderPerformanceFragment } = loadPerfFresh();
+  const html = renderPerformanceFragment({
+    windowDays: 7,
+    metrics: {
+      window: { days: 7 },
+      content: { posts_count: 0, fb_reach: null, fb_engagement: null, recent_top3: [] },
+      outbound: {
+        lender: {}, broker: {}, auction_house: {},
+      },
+      audience_series: [
+        { recorded_at: '2026-05-11', followers_count: 10 },
+        { recorded_at: '2026-05-25', followers_count: 20 },
+      ],
+    },
+  });
+  assert.ok(/Audience growth/.test(html));
+  // Missing series degrades silently
+  const html2 = renderPerformanceFragment({
+    windowDays: 7,
+    metrics: {
+      window: { days: 7 },
+      content: { posts_count: 0, fb_reach: null, fb_engagement: null, recent_top3: [] },
+      outbound: { lender: {}, broker: {}, auction_house: {} },
+    },
+  });
+  assert.ok(!/Audience growth/.test(html2));
+});
