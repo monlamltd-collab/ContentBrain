@@ -2035,15 +2035,19 @@ async function pollTelegram() {
           console.log(`[Telegram] Downloaded video: ${rawFilename}`);
 
           // Watermark with AuctionBrain logo
-          const { execSync } = require('child_process');
+          const { execFileSync } = require('child_process');
           const ffmpeg = require('ffmpeg-static');
           const logoPath = path.join(__dirname, 'LOGOS', 'auctionbrain-logo-transparent.png');
           const rawPath = path.join(__dirname, 'output', rawFilename);
           const outPath = path.join(__dirname, 'output', filename);
 
           try {
-            execSync(
-              `"${ffmpeg}" -i "${rawPath}" -i "${logoPath}" -filter_complex "[1:v]scale=700:-1,format=rgba,colorchannelmixer=aa=0.9[logo];[0:v][logo]overlay=W-w-50:H-h-50" -c:a copy -y "${outPath}"`,
+            // argv array — no shell, so paths can't inject commands
+            execFileSync(
+              ffmpeg,
+              ['-i', rawPath, '-i', logoPath,
+               '-filter_complex', '[1:v]scale=700:-1,format=rgba,colorchannelmixer=aa=0.9[logo];[0:v][logo]overlay=W-w-50:H-h-50',
+               '-c:a', 'copy', '-y', outPath],
               { stdio: 'pipe' }
             );
             // Clean up raw file
