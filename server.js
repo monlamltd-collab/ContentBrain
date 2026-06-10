@@ -1797,6 +1797,7 @@ async function pollTelegram() {
     }
 
     const { result } = await res.json();
+    const offsetBeforeBatch = telegramOffset;
     for (const update of result) {
       telegramOffset = update.update_id + 1;
 
@@ -3046,6 +3047,14 @@ Classify this request. Return JSON:
         }
       }
     }
+
+    // Persist the advanced offset once per non-empty batch (fire-and-forget;
+    // a Supabase blip must never stall the poll loop). On redeploy the loop
+    // resumes from here instead of re-processing old updates.
+    if (telegramOffset > offsetBeforeBatch) {
+      runtimeConfig.setTelegramOffset(telegramOffset).catch(e =>
+        console.warn(`[Telegram] offset persist failed: ${e.message}`));
+    }
   } catch (err) {
     // Silence network errors, will retry next poll
     pollLastError = err.message;
@@ -3686,6 +3695,18 @@ app.listen(PORT, async () => {
   // poll loop was dead when you tried to click them), re-send fresh
   // review cards now so the next click actually fires.
   await resendDraftReviewCards();
+
+  // Resume polling from the persisted offset so a redeploy doesn't
+  // re-process updates that were already handled (duplicate approvals).
+  try {
+    const saved = await runtimeConfig.getTelegramOffset();
+    if (saved > telegramOffset) {
+      telegramOffset = saved;
+      console.log(`[startup] Telegram offset restored: ${saved}`);
+    }
+  } catch (err) {
+    console.warn(`[startup] Telegram offset restore failed (starting from 0): ${err.message}`);
+  }
 
   pollTelegram();
 });
