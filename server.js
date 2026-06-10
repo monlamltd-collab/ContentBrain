@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { createLLM } = require('./lib/llm');
+const { createLLM, parseLLMJson } = require('./lib/llm');
 const express = require('express');
 const path = require('path');
 const cron = require('node-cron');
@@ -1727,9 +1727,7 @@ Return ONLY this JSON (no commentary, no markdown fences):
     messages: [{ role: 'user', content: userPrompt }]
   });
   const txt = resp.content[0].text;
-  const m = txt.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('Claude did not return JSON');
-  const revised = JSON.parse(m[0]);
+  const revised = parseLLMJson(txt, { label: 'blog-revise' });
 
   // Re-render markdown to HTML for the live blog page
   const { marked } = require('marked');
@@ -2076,8 +2074,12 @@ async function pollTelegram() {
           });
 
           const text = response.content[0].text;
-          const match = text.match(/\{[\s\S]*\}/);
-          const copy = match ? JSON.parse(match[0]) : { copy_headline: userCaption || 'New video', copy_body: '', copy_cta: b.url };
+          let copy;
+          try {
+            copy = parseLLMJson(text, { label: 'video-caption' });
+          } catch {
+            copy = { copy_headline: userCaption || 'New video', copy_body: '', copy_cta: b.url };
+          }
 
           // Schedule for next available slot
           const scheduledFor = new Date();
@@ -2138,8 +2140,12 @@ async function pollTelegram() {
           });
 
           const visionText = visionResponse.content[0].text;
-          const visionMatch = visionText.match(/\{[\s\S]*\}/);
-          const extracted = visionMatch ? JSON.parse(visionMatch[0]) : { extracted_text: '', summary: 'Could not extract content', key_points: '', tags: [] };
+          let extracted;
+          try {
+            extracted = parseLLMJson(visionText, { label: 'photo-vision' });
+          } catch {
+            extracted = { extracted_text: '', summary: 'Could not extract content', key_points: '', tags: [] };
+          }
 
           await saveSeed({
             source: 'telegram_photo',
@@ -2217,9 +2223,12 @@ or
 { "ok": false, "error": "short reason" }` }]
             });
             const parseText = parseResp.content[0].text;
-            const m = parseText.match(/\{[\s\S]*\}/);
-            if (!m) throw new Error('Could not interpret your time');
-            const parsed = JSON.parse(m[0]);
+            let parsed;
+            try {
+              parsed = parseLLMJson(parseText, { label: 'schedule-time' });
+            } catch {
+              throw new Error('Could not interpret your time');
+            }
             if (!parsed.ok) {
               await sendNotification(`I couldn't schedule that: ${parsed.error || 'try a different format'}.`);
               continue;
@@ -2357,9 +2366,15 @@ or
                         });
 
                         const classText = classifyResponse.content[0].text;
-                        const classMatch = classText.match(/\{[\\s\\S]*\}/);
-                        if (!classMatch) throw new Error('Could not interpret feedback');
-                        const classification = JSON.parse(classMatch[0]);
+                        // Previous regex here was double-escaped (/[\\s\\S]/ matches only
+                        // literal \, s, S chars) so this branch ALWAYS threw — the social
+                        // Revise button was broken. parseLLMJson fixes it.
+                        let classification;
+                        try {
+                          classification = parseLLMJson(classText, { label: 'revise-classify' });
+                        } catch {
+                          throw new Error('Could not interpret feedback');
+                        }
 
                         console.log(`[Telegram] Revision classified: ${classification.type} — ${classification.summary}`);
                         await sendNotification(`Understood: ${classification.summary}`);
@@ -2379,8 +2394,9 @@ or
                         });
 
                         const aiText = copyResponse.content[0].text;
-                        const match = aiText.match(/\{[\\s\\S]*\}/);
-                        if (match) revised = JSON.parse(match[0]);
+                        try {
+                          revised = parseLLMJson(aiText, { label: 'revise-copy' });
+                        } catch {} // keep original copy on parse failure
 
                         // Apply copy changes to DB
                         const { supabase } = require('./lib/supabase');
@@ -2427,9 +2443,12 @@ or
               });
 
               const extractText = extractResponse.content[0].text;
-              const extractMatch = extractText.match(/\{[\s\S]*\}/);
-              if (!extractMatch) throw new Error('Could not parse brief');
-              const structured = JSON.parse(extractMatch[0]);
+              let structured;
+              try {
+                structured = parseLLMJson(extractText, { label: 'brief-extract' });
+              } catch {
+                throw new Error('Could not parse brief');
+              }
 
               const { saveBrief } = require('./lib/supabase');
               await saveBrief(structured);
@@ -2709,9 +2728,12 @@ Guidelines:
           });
 
           const intentText = intentResponse.content[0].text;
-          const intentMatch = intentText.match(/\{[\s\S]*\}/);
-          if (!intentMatch) throw new Error('Could not classify message');
-          const intent = JSON.parse(intentMatch[0]);
+          let intent;
+          try {
+            intent = parseLLMJson(intentText, { label: 'smart-intent' });
+          } catch {
+            throw new Error('Could not classify message');
+          }
 
           console.log(`[Telegram] Action: ${intent.action || 'chat'} — ${intent.summary || intent.reply?.slice(0, 50)}`);
 
@@ -2782,9 +2804,12 @@ Classify this request. Return JSON:
             });
 
             const classText = classifyResponse.content[0].text;
-            const classMatch = classText.match(/\{[\s\S]*\}/);
-            if (!classMatch) throw new Error('Could not interpret feedback');
-            const classification = JSON.parse(classMatch[0]);
+            let classification;
+            try {
+              classification = parseLLMJson(classText, { label: 'smart-revise-classify' });
+            } catch {
+              throw new Error('Could not interpret feedback');
+            }
 
             await sendNotification(`Understood: ${classification.summary}`);
 
@@ -2800,8 +2825,9 @@ Classify this request. Return JSON:
                 messages: [{ role: 'user', content: `You wrote this social media post for ${b.name}:\n\nHeadline: ${post.copy_headline}\nBody: ${post.copy_body}\nCTA: ${post.copy_cta}\n\nRevision needed: ${copyInstructions}\n\nRewrite the post. Keep the same format and tone. British English, no hashtags. Return JSON: { "copy_headline": "...", "copy_body": "...", "copy_cta": "..." }` }]
               });
               const aiText = copyResponse.content[0].text;
-              const match = aiText.match(/\{[\s\S]*\}/);
-              if (match) revised = JSON.parse(match[0]);
+              try {
+                revised = parseLLMJson(aiText, { label: 'smart-revise-copy' });
+              } catch {} // keep original copy on parse failure
             }
 
             if (classification.video_action === 'extend_duration' || classification.video_action === 're-render') {
@@ -2868,8 +2894,12 @@ Classify this request. Return JSON:
               });
 
               const seedText = seedResponse.content[0].text;
-              const seedMatch = seedText.match(/\{[\s\S]*\}/);
-              const seed = seedMatch ? JSON.parse(seedMatch[0]) : { summary: text.slice(0, 100), key_points: '', tags: [] };
+              let seed;
+              try {
+                seed = parseLLMJson(seedText, { label: 'seed-extract' });
+              } catch {
+                seed = { summary: text.slice(0, 100), key_points: '', tags: [] };
+              }
 
               await saveSeed({
                 source: 'telegram_text',
@@ -2982,8 +3012,12 @@ Classify this request. Return JSON:
               });
 
               const scrapeText = scrapeResponse.content[0].text;
-              const scrapeMatch = scrapeText.match(/\{[\s\S]*\}/);
-              const scraped = scrapeMatch ? JSON.parse(scrapeMatch[0]) : { summary: 'Could not summarise', key_points: '', tags: [] };
+              let scraped;
+              try {
+                scraped = parseLLMJson(scrapeText, { label: 'url-scrape' });
+              } catch {
+                scraped = { summary: 'Could not summarise', key_points: '', tags: [] };
+              }
 
               await saveSeed({
                 source: 'telegram_url',
