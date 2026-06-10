@@ -1157,6 +1157,25 @@ cron.schedule('30 6 * * *', async () => {
   }
 });
 
+// Reddit scraper — 05:45 UTC, before the 06:30 brief promotion and the
+// 07:00 generation window. Firecrawl-extracts top weekly threads from the
+// property/broker/bridging/solicitor subreddit list (lever-tunable) into
+// scraped_articles; runRedditScrape also promotes immediately, so the
+// 06:30 cron is belt-and-braces for anything it misses.
+cron.schedule('45 5 * * *', async () => {
+  try {
+    const { runRedditScrape } = require('./lib/reddit-scraper');
+    const result = await runRedditScrape();
+    console.log(`[cron:reddit-scraper] ${JSON.stringify(result)}`);
+    if (result.errors && result.errors.length >= 3) {
+      await sendNotification(`<b>Reddit scraper</b>: ${result.inserted} inserted, ${result.errors.length} errors — check logs.`).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[cron:reddit-scraper] failed:', err.message);
+    await sendNotification(`<b>Reddit scraper failed</b>: ${err.message.slice(0, 200)}`).catch(() => {});
+  }
+});
+
 // Check on wake — if we missed today's generation, run it now
 cron.schedule('*/30 * * * *', async () => {
   const today = new Date().toISOString().slice(0, 10);
