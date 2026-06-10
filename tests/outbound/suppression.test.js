@@ -49,13 +49,16 @@ function freshSupabaseStub() {
 }
 
 let lastEqKey = null;
+let leverEnabled = true; // mocked runtime-config isSuppressionCheckEnabled
 
 function loadSuppressionFresh() {
   // Wipe both modules from cache so the suppression module re-initialises with
   // a fresh cache state and our latest stub.
   const supPath = require.resolve('../../lib/supabase');
+  const runtimeCfgPath = require.resolve('../../lib/runtime-config');
   const suppressionPath = require.resolve('../../lib/suppression');
   delete require.cache[supPath];
+  delete require.cache[runtimeCfgPath];
   delete require.cache[suppressionPath];
 
   require.cache[supPath] = {
@@ -63,6 +66,14 @@ function loadSuppressionFresh() {
     filename: supPath,
     loaded: true,
     exports: { supabase: freshSupabaseStub() },
+  };
+
+  // Mock the lever read (lazy-required inside isSuppressed)
+  require.cache[runtimeCfgPath] = {
+    id: runtimeCfgPath,
+    filename: runtimeCfgPath,
+    loaded: true,
+    exports: { isSuppressionCheckEnabled: async () => leverEnabled },
   };
 
   return require('../../lib/suppression');
@@ -74,6 +85,7 @@ beforeEach(() => {
   lastInsert = null;
   raceMode = false;
   lastEqKey = null;
+  leverEnabled = true;
 });
 
 // ── Exact email match ────────────────────────────────────────────────────
@@ -186,4 +198,39 @@ test('isSuppressed: cache expires after TTL window', async () => {
   } finally {
     Date.now = realNow;
   }
+});
+
+// ── Dashboard lever read-side gate ───────────────────────────────────────
+
+test('lever disabled: suppressed contact passes with disabled flag', async () => {
+  mockRows = [{ email_or_domain: 'blocked@x.co', reason: 'manual' }];
+  leverEnabled = false;
+  const { isSuppressed } = loadSuppressionFresh();
+  const r = await isSuppressed('blocked@x.co');
+  assert.equal(r.suppressed, false);
+  assert.equal(r.disabled, true, 'result must carry disabled:true so callers can log it');
+});
+
+test('lever enabled (default): suppressed contact blocks normally', async () => {
+  mockRows = [{ email_or_domain: 'blocked@x.co', reason: 'manual' }];
+  leverEnabled = true;
+  const { isSuppressed } = loadSuppressionFresh();
+  const r = await isSuppressed('blocked@x.co');
+  assert.equal(r.suppressed, true);
+  assert.equal(r.level, 'address');
+});
+
+test('lever read throwing: treated as enabled (fail safe)', async () => {
+  mockRows = [{ email_or_domain: 'blocked@x.co', reason: 'bounce' }];
+  const runtimeCfgPath = require.resolve('../../lib/runtime-config');
+  const { isSuppressed } = (() => {
+    const mod = loadSuppressionFresh();
+    // Swap the lever mock for a throwing one AFTER load (lazy require re-reads cache)
+    require.cache[runtimeCfgPath].exports = {
+      isSuppressionCheckEnabled: async () => { throw new Error('config down'); },
+    };
+    return mod;
+  })();
+  const r = await isSuppressed('blocked@x.co');
+  assert.equal(r.suppressed, true, 'config outage must NOT skip suppression');
 });

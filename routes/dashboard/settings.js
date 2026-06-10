@@ -463,11 +463,10 @@ router.post('/system/telegram-receipt', async (req, res) => {
 });
 
 /**
- * NOTE — write-only lever. lib/publish.js#publishToResend still calls
- * isSuppressed unconditionally; this toggle records intent but does NOT
- * gate the read side (yet). The safe failure mode is "check stays on".
- * See design doc §6.3 + the JSDoc on the lib/publish.js call site for the
- * read-side wiring TODO.
+ * Read side lives in lib/suppression.js#isSuppressed — the one central
+ * gate (covers both the publishToResend pre-flight and sendOutbound's
+ * internal check). Missing/true ⇒ enabled; only a literal false disables.
+ * Suppression WRITES (bounce/complaint adds) are always-on regardless.
  */
 router.post('/system/suppression-check', async (req, res) => {
   const enabled = isTruthyFormField((req.body || {}).enabled);
