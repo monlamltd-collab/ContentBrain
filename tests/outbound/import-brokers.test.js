@@ -95,15 +95,20 @@ function makeQuery(table) {
   return api;
 }
 
+// Captured Firecrawl scrape calls (reset per loadImporterFresh).
+let firecrawlCalls = [];
+
 // Inject mocks via require.cache BEFORE the importer is loaded.
 function loadImporterFresh(mocks = {}) {
   const supPath = require.resolve('../../lib/supabase');
   const lendersPath = require.resolve('../../lib/sales-brain/import-lenders');
   const fcaPath = require.resolve('../../lib/sales-brain/fca-fetch');
+  const firecrawlPath = require.resolve('../../lib/firecrawl');
   const importerPath = require.resolve('../../lib/sales-brain/import-brokers');
   delete require.cache[supPath];
   delete require.cache[lendersPath];
   delete require.cache[fcaPath];
+  delete require.cache[firecrawlPath];
   delete require.cache[importerPath];
 
   require.cache[supPath] = {
@@ -117,6 +122,18 @@ function loadImporterFresh(mocks = {}) {
       fetchFirmByFrn: mocks.fetchFirmByFrn || (async () => { throw new Error('fetchFirmByFrn not mocked'); }),
       fetchBulkRegister: mocks.fetchBulkRegister || (async () => { throw new Error('fetchBulkRegister not mocked'); }),
       assertFcaAuth: () => ({ email: 'mock', key: 'mock' }),
+    },
+  };
+
+  firecrawlCalls = [];
+  require.cache[firecrawlPath] = {
+    id: firecrawlPath, filename: firecrawlPath, loaded: true,
+    exports: {
+      isFirecrawlConfigured: mocks.isFirecrawlConfigured || (() => true),
+      firecrawlScrape: mocks.firecrawlScrape || (async (url) => {
+        firecrawlCalls.push(url);
+        return { json: {} };
+      }),
     },
   };
 
@@ -282,4 +299,76 @@ test('importer: errors clearly when no CSV and no FCA env', async () => {
   } finally {
     if (prevEmail) process.env.FCA_AUTH_EMAIL = prevEmail;
   }
+});
+
+// ── Firecrawl enrichment (Phase E) ───────────────────────────────────────
+
+test('firecrawl: named-person + generic contacts inserted with right confidence/source', async () => {
+  const { importBrokers } = loadImporterFresh({
+    firecrawlScrape: async (url) => {
+      firecrawlCalls.push(url);
+      return {
+        json: {
+          people: [{ name: 'Jane Broker', role: 'Director', email: 'Jane@AcmeBridging.co.uk' }],
+          emails: ['hello@acmebridging.co.uk'],
+        },
+      };
+    },
+  });
+
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 1 });
+
+  const contacts = [...store.contacts.values()].filter(c => c.source === 'firecrawl');
+  assert.equal(contacts.length, 2);
+  const jane = contacts.find(c => c.email === 'jane@acmebridging.co.uk');
+  assert.ok(jane, 'named-person contact inserted, email lowercased');
+  assert.equal(jane.confidence_score, 70);
+  assert.equal(jane.name, 'Jane Broker');
+  const generic = contacts.find(c => c.email === 'hello@acmebridging.co.uk');
+  assert.equal(generic.confidence_score, 60);
+  assert.equal(generic.role, 'Generic inbox');
+});
+
+test('firecrawl: empty extraction → info@ synthetic fallback still inserted', async () => {
+  const { importBrokers } = loadImporterFresh(); // default mock returns { json: {} }
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 5 });
+
+  // Synthetic info@ contacts unchanged (source 'manual', confidence 50)
+  const synth = [...store.contacts.values()].filter(c => c.source === 'manual');
+  assert.ok(synth.length >= 1);
+  assert.ok(synth.every(c => c.confidence_score === 50));
+});
+
+test('firecrawl: firecrawlTopN caps the number of scrapes', async () => {
+  const { importBrokers } = loadImporterFresh();
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 2 });
+  // 4 firms match the keyword filter but only 3 have websites; cap=2 means
+  // at most 2 scrape calls regardless.
+  assert.ok(firecrawlCalls.length <= 2, `expected <=2 scrapes, got ${firecrawlCalls.length}`);
+});
+
+test('firecrawl: key missing → warning, zero scrapes, import still completes', async () => {
+  const { importBrokers } = loadImporterFresh({
+    isFirecrawlConfigured: () => false,
+  });
+  const result = await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true });
+  assert.equal(firecrawlCalls.length, 0);
+  assert.ok(result.warnings.some(w => /FIRECRAWL_API_KEY missing/.test(w)));
+  assert.ok(store.prospects.size > 0, 'prospects still imported');
+});
+
+test('firecrawl: scrape failure for one firm warns and continues', async () => {
+  let call = 0;
+  const { importBrokers } = loadImporterFresh({
+    firecrawlScrape: async (url) => {
+      firecrawlCalls.push(url);
+      call++;
+      if (call === 1) throw new Error('site timed out');
+      return { json: { emails: ['team@acme-stf.co.uk'] } };
+    },
+  });
+  const result = await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 3 });
+  assert.ok(result.warnings.some(w => /Firecrawl enrichment failed/.test(w)));
+  const fc = [...store.contacts.values()].filter(c => c.source === 'firecrawl');
+  assert.ok(fc.length >= 1, 'later firms still enriched after one failure');
 });
