@@ -11,12 +11,16 @@ const RESEND_PATH = require.resolve('../../lib/resend');
 const SUPP_PATH = require.resolve('../../lib/suppression');
 const SUPABASE_PATH = require.resolve('../../lib/supabase');
 const SDK_PATH = require.resolve('resend');
+const INBOUND_PATH = require.resolve('../../lib/inbound');
+const TELEGRAM_PATH = require.resolve('../../lib/telegram');
 
 // Ordered call log so we can prove suppression-before-send.
 let callLog = [];
 let suppressionReturn = { suppressed: false, match: null, reason: null, level: null };
 let resendSendArgs = [];
 let addSuppressionCalls = [];
+let inboundShouldThrow = false;
+let telegramNotifications = [];
 
 class MockResendClient {
   constructor(key) {
@@ -33,9 +37,28 @@ class MockResendClient {
 
 function loadResendFresh() {
   // Wipe relevant modules so env + mocks take effect
-  for (const p of [RESEND_PATH, SUPP_PATH, SUPABASE_PATH, SDK_PATH]) {
+  for (const p of [RESEND_PATH, SUPP_PATH, SUPABASE_PATH, SDK_PATH, INBOUND_PATH, TELEGRAM_PATH]) {
     delete require.cache[p];
   }
+
+  // Mock inbound (lazy-required by the email.received branch)
+  require.cache[INBOUND_PATH] = {
+    id: INBOUND_PATH, filename: INBOUND_PATH, loaded: true,
+    exports: {
+      handleInboundEmail: async () => {
+        if (inboundShouldThrow) throw new Error('classify blew up');
+        return { replyId: 'r-1', intent: 'interested' };
+      },
+    },
+  };
+
+  // Mock telegram (lazy-required by the inbound-failure alert)
+  require.cache[TELEGRAM_PATH] = {
+    id: TELEGRAM_PATH, filename: TELEGRAM_PATH, loaded: true,
+    exports: {
+      sendNotification: async (msg) => { telegramNotifications.push(msg); },
+    },
+  };
 
   // Mock supabase (resend.js still pulls it for posts.meta updates; webhook
   // path uses it — sendOutbound path does not, but module loads it eagerly).
@@ -84,6 +107,8 @@ beforeEach(() => {
   resendSendArgs = [];
   addSuppressionCalls = [];
   suppressionReturn = { suppressed: false, match: null, reason: null, level: null };
+  inboundShouldThrow = false;
+  telegramNotifications = [];
   process.env.RESEND_API_KEY = 'test-resend-key';
   process.env.RESEND_WEBHOOK_SECRET = 'test-webhook-secret';
 });
@@ -270,4 +295,42 @@ test('handleWebhook: email.bounced routes to addSuppression', async () => {
   assert.equal(addSuppressionCalls.length, 1);
   assert.equal(addSuppressionCalls[0].email, 'bounce@x.co');
   assert.equal(addSuppressionCalls[0].reason, 'bounce');
+});
+
+// ── handleWebhook: inbound failure → Telegram alert ──────────────────────
+
+test('handleWebhook: email.received handler failure sends Telegram alert with contact email', async () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
+  inboundShouldThrow = true;
+  const { handleWebhook } = loadResendFresh();
+
+  const event = {
+    type: 'email.received',
+    data: { email_id: 'em-99', from: 'prospect@lender.co.uk', subject: 'Re: BridgeMatch' },
+  };
+  const body = Buffer.from(JSON.stringify(event));
+
+  const res = await handleWebhook(body, svixSign(body));
+  // Webhook must still return handled (200 to Resend — no retry storm)
+  assert.equal(res.handled, true);
+  assert.ok(res.actions.some(a => /inbound handler failed/.test(a)));
+  // Telegram alert fired with the contact + error context
+  assert.equal(telegramNotifications.length, 1);
+  assert.match(telegramNotifications[0], /prospect@lender\.co\.uk/);
+  assert.match(telegramNotifications[0], /classify blew up/);
+});
+
+test('handleWebhook: email.received success does NOT send a failure alert', async () => {
+  process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET_WHSEC;
+  const { handleWebhook } = loadResendFresh();
+
+  const event = {
+    type: 'email.received',
+    data: { email_id: 'em-100', from: 'ok@lender.co.uk', subject: 'Re: hello' },
+  };
+  const body = Buffer.from(JSON.stringify(event));
+
+  const res = await handleWebhook(body, svixSign(body));
+  assert.equal(res.handled, true);
+  assert.equal(telegramNotifications.length, 0);
 });
