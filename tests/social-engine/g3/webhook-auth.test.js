@@ -30,6 +30,7 @@ const INBOUND  = 'inbound-secret-BBBBBBBBBBBBB';
 beforeEach(() => {
   delete process.env.MAKE_WEBHOOK_SECRET;
   delete process.env.MAKE_CALLBACK_SECRET;
+  delete process.env.MAKE_HMAC_TS;
 });
 
 // ── signOutbound ──────────────────────────────────────────────
@@ -173,4 +174,93 @@ test('round-trip: sign + verify with same secret returns true', () => {
   const body = Buffer.from(JSON.stringify({ ok: true, n: 42 }));
   const sig = signOutbound(body);
   assert.equal(verifyInbound(body, { 'x-make-signature': sig }), true);
+});
+
+// ── MAKE_HMAC_TS=1 — timestamped scheme (PR4 replay protection) ──────────
+
+function tsDigest(secret, ts, body) {
+  return 'sha256=' + crypto.createHmac('sha256', secret)
+    .update(Buffer.concat([Buffer.from(`${ts}.`), Buffer.from(body)]))
+    .digest('hex');
+}
+
+test('ts: signOutbound returns { signature, timestamp } when flag on', () => {
+  process.env.MAKE_WEBHOOK_SECRET = OUTBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { signOutbound } = loadFresh();
+  const out = signOutbound('hello');
+  assert.equal(typeof out, 'object');
+  assert.match(out.signature, /^sha256=[0-9a-f]{64}$/);
+  assert.ok(Number.isFinite(out.timestamp));
+  // Digest must be over "<ts>.hello"
+  assert.equal(out.signature, tsDigest(OUTBOUND, out.timestamp, 'hello'));
+});
+
+test('ts: verifyInbound round-trip with fresh timestamp succeeds', () => {
+  process.env.MAKE_CALLBACK_SECRET = INBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { verifyInbound } = loadFresh();
+  const body = '{"request_id":"r-1"}';
+  const ts = Math.floor(Date.now() / 1000);
+  const headers = {
+    'x-make-signature': tsDigest(INBOUND, ts, body),
+    'x-make-timestamp': String(ts),
+  };
+  assert.equal(verifyInbound(body, headers), true);
+});
+
+test('ts: verifyInbound rejects stale timestamp (> 300s old)', () => {
+  process.env.MAKE_CALLBACK_SECRET = INBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { verifyInbound } = loadFresh();
+  const body = '{}';
+  const ts = Math.floor(Date.now() / 1000) - 600;
+  const headers = {
+    'x-make-signature': tsDigest(INBOUND, ts, body),
+    'x-make-timestamp': String(ts),
+  };
+  assert.throws(() => verifyInbound(body, headers), /replay window/);
+});
+
+test('ts: verifyInbound accepts skew within the window (200s)', () => {
+  process.env.MAKE_CALLBACK_SECRET = INBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { verifyInbound } = loadFresh();
+  const body = '{}';
+  const ts = Math.floor(Date.now() / 1000) - 200;
+  const headers = {
+    'x-make-signature': tsDigest(INBOUND, ts, body),
+    'x-make-timestamp': String(ts),
+  };
+  assert.equal(verifyInbound(body, headers), true);
+});
+
+test('ts: verifyInbound rejects missing timestamp header (never header-optional)', () => {
+  process.env.MAKE_CALLBACK_SECRET = INBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { verifyInbound } = loadFresh();
+  const body = '{}';
+  const ts = Math.floor(Date.now() / 1000);
+  const headers = { 'x-make-signature': tsDigest(INBOUND, ts, body) };
+  assert.throws(() => verifyInbound(body, headers), /missing timestamp/);
+});
+
+test('ts: flag off — legacy body-only round-trip still green, timestamp ignored', () => {
+  process.env.MAKE_CALLBACK_SECRET = INBOUND;
+  // MAKE_HMAC_TS unset
+  const { verifyInbound } = loadFresh();
+  const body = '{"legacy":true}';
+  const legacySig = 'sha256=' + crypto.createHmac('sha256', INBOUND).update(body).digest('hex');
+  const headers = { 'x-make-signature': legacySig, 'x-make-timestamp': 'garbage-ignored' };
+  assert.equal(verifyInbound(body, headers), true);
+});
+
+test('ts: verifyOutbound supports query-string ts fallback for GET polls', () => {
+  process.env.MAKE_WEBHOOK_SECRET = OUTBOUND;
+  process.env.MAKE_HMAC_TS = '1';
+  const { verifyOutbound } = loadFresh();
+  const body = Buffer.alloc(0);
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = tsDigest(OUTBOUND, ts, '');
+  assert.equal(verifyOutbound(body, {}, sig, String(ts)), true);
 });

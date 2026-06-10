@@ -161,3 +161,30 @@ test('requestBoost: propagates error when insertBoostRun throws', async () => {
     /DB insert failed/
   );
 });
+
+// ── deriveAudienceSpec — PR4 interest narrowing ───────────────────────
+
+test('deriveAudienceSpec: yield-8plus swaps interests for the override set', () => {
+  const { deriveAudienceSpec } = loadBoostFresh();
+  const spec = deriveAudienceSpec('yield-8plus');
+  assert.deepEqual(spec.interests, ['Buy-to-let', 'Property investment']);
+  // Geo + age stay default
+  assert.ok(Array.isArray(spec.geo_locations_cities) && spec.geo_locations_cities.length > 0);
+  assert.ok(typeof spec.age_min === 'number');
+});
+
+test('deriveAudienceSpec: regional tag keeps default interests (no override)', () => {
+  const { deriveAudienceSpec } = loadBoostFresh();
+  const { DEFAULT_AUDIENCE_SPEC } = require('../../lib/social-engine/constants');
+  const spec = deriveAudienceSpec('wales');
+  assert.deepEqual(spec.interests, [...DEFAULT_AUDIENCE_SPEC.interests]);
+  assert.deepEqual(spec.geo_locations_cities, ['Cardiff', 'Newport', 'Swansea']);
+});
+
+test('deriveAudienceSpec: override interests are a mutable copy', () => {
+  const { deriveAudienceSpec } = loadBoostFresh();
+  const a = deriveAudienceSpec('refurb-projects');
+  assert.doesNotThrow(() => a.interests.push('extra'));
+  const b = deriveAudienceSpec('refurb-projects');
+  assert.equal(b.interests.length, 2, 'second call must not see the mutation');
+});
