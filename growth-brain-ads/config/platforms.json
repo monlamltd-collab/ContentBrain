@@ -1,0 +1,8 @@
+{
+  "comment": "Hard length limits per platform. facebook primary 125 / headline 40 are Meta's pre-truncation recommendations treated as hard limits here.",
+  "facebook": { "primary_max": 125, "headline_max": 40 },
+  "instagram": { "primary_max": 2200 },
+  "instagram_reels": { "primary_max": 2200 },
+  "x": { "primary_max": 280 },
+  "linkedin": { "primary_max": 3000 }
+}

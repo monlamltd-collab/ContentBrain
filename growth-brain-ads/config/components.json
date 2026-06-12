@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "comment": "PINNED CONTRACT. Changes via PR only — same governance as lib/types/lot.js. The weekly DeepSeek V4 call proposes additions; Simon reviews and commits. The weak model (DeepSeek Flash) may only reference IDs that exist here.",
+  "personas": [
+    {
+      "id": "PS1",
+      "name": "active_investor",
+      "notes": "Buys 2+ auction properties a year. Values speed and edge. Hates manual catalogue trawling."
+    },
+    {
+      "id": "PS2",
+      "name": "first_time_auction_buyer",
+      "notes": "Curious, nervous about legal packs and hidden risks. Wants reassurance and plain English."
+    },
+    {
+      "id": "PS3",
+      "name": "bridging_broker",
+      "notes": "Wants deal flow signals early. Follows auction activity to spot finance opportunities."
+    }
+  ],
+  "_personas_note": "Personas are not yet selected by the weak model — reserved for prompt context and the weekly V4 proposal call.",
+  "hooks": [
+    {
+      "id": "H1",
+      "text": "Still {tedious_activity} by hand?",
+      "slots": ["tedious_activity"]
+    },
+    {
+      "id": "H2",
+      "text": "Auction research, done in minutes.",
+      "slots": []
+    },
+    {
+      "id": "H3",
+      "text": "The best lots go to the prepared.",
+      "slots": []
+    },
+    {
+      "id": "H4",
+      "text": "What if {tedious_activity} took minutes, not evenings?",
+      "slots": ["tedious_activity"]
+    },
+    {
+      "id": "H5",
+      "text": "Auction day moves fast. Your research should keep up.",
+      "slots": []
+    }
+  ],
+  "proof_points": [
+    {
+      "id": "P1",
+      "text": "We read catalogues from 170+ auction houses, so you don't have to."
+    },
+    {
+      "id": "P2",
+      "text": "Every lot scored in seconds."
+    },
+    {
+      "id": "P3",
+      "text": "Guide price, legal pack and key risks in one view."
+    },
+    {
+      "id": "P4",
+      "text": "Free to try, built for UK auction buyers."
+    }
+  ],
+  "ctas": [
+    {
+      "id": "C1",
+      "text": "Follow for daily lot picks.",
+      "platforms": ["facebook", "instagram", "instagram_reels", "x"]
+    },
+    {
+      "id": "C2",
+      "text": "Try it free at auctions.bridgematch.co.uk.",
+      "platforms": ["facebook", "linkedin", "x"]
+    },
+    {
+      "id": "C3",
+      "text": "Tap follow so the next bargain doesn't pass you by.",
+      "platforms": ["instagram", "instagram_reels"]
+    },
+    {
+      "id": "C4",
+      "text": "Connect for weekly auction market insight.",
+      "platforms": ["linkedin"]
+    }
+  ],
+  "approved_claims": [
+    {
+      "id": "AC1",
+      "text": "170+ auction houses",
+      "note": "The ONLY approved scale claim. Any other '<number> auction houses' phrasing is blocked by gate 4."
+    }
+  ]
+}
