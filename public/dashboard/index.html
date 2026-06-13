@@ -33,7 +33,13 @@
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Queue</button>
-      <a class="tab" data-tab="editorial" href="/content">Editorial</a>
+      <button class="tab" data-tab="editorial"
+        role="tab"
+        hx-get="/dashboard/editorial"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Editorial</button>
       <button class="tab" data-tab="performance"
         role="tab"
         hx-get="/dashboard/performance"

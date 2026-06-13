@@ -120,20 +120,18 @@
     </div>
   </section>
 
-  <!-- Section 3 — Content (social-side levers) -->
+  <!-- Section 3 — Content: consolidated into the Design tab so creative
+       levers have ONE write path. The /dashboard/settings/content/*
+       fragment endpoints remain functional but are no longer loaded here. -->
   <section class="settings-section section-content" id="section-content">
     <h3>Content</h3>
     <p class="settings-section-sub">
-      Active brands, template mix, editorial directives.
-      Same levers as the Telegram <code>/active</code>, <code>/templates</code>, <code>/directive</code> commands.
+      Brand activation, voice, template mix and every other creative lever now
+      lives in the <strong>Design</strong> tab — one place to tune everything
+      generation reads. (Telegram commands <code>/active</code>,
+      <code>/templates</code>, <code>/directive</code>, <code>/durations</code>
+      write the same levers.)
     </p>
-
-    <div id="content-brands"
-         hx-get="/dashboard/settings/content/brands"
-         hx-trigger="load"
-         hx-swap="innerHTML">
-      <p class="loading">Loading brand levers&hellip;</p>
-    </div>
   </section>
 
   <!-- Section 4 — System (meta switches) -->

@@ -1,0 +1,323 @@
+<!-- routes/dashboard/editorial.html — Editorial tab skeleton (HTMX partial).
+     Read panels self-load as fragments; actions call the untouched
+     /api/content/* JSON endpoints via the api() helper below. -->
+<section class="tab-section editorial">
+  <div class="section-head">
+    <h2>Editorial</h2>
+    <p class="section-sub">Blog coverage, draft review and source material for both brands.</p>
+  </div>
+
+  <section class="design-section">
+    <div class="section-head"><h3>Topic coverage</h3>
+      <p class="section-sub">What the published blogs already talk about — avoid piling onto saturated tags.</p></div>
+    <div id="editorial-coverage" hx-get="/dashboard/editorial/coverage" hx-trigger="load" hx-swap="outerHTML">
+      <p class="loading">Loading&hellip;</p>
+    </div>
+  </section>
+
+  <section class="design-section">
+    <div class="section-head"><h3>Draft queue</h3>
+      <p class="section-sub">Blog drafts awaiting review — approve, amend in place, or reject with feedback.</p>
+      <button class="btn btn-save btn-tiny" hx-get="/dashboard/editorial/queue" hx-target="#editorial-queue" hx-swap="outerHTML">↻ Refresh</button>
+    </div>
+    <div id="editorial-queue" hx-get="/dashboard/editorial/queue" hx-trigger="load" hx-swap="outerHTML">
+      <p class="loading">Loading&hellip;</p>
+    </div>
+  </section>
+
+  <section class="design-section">
+    <div class="section-head"><h3>Add content</h3>
+      <p class="section-sub">Feed the engines: notes for future posts, pasted articles, or uploaded PDFs/photos.</p></div>
+    <div class="ed-tabs">
+      <button class="filter-pill active" data-edtab="notes" onclick="edShowTab('notes', this)">Notes</button>
+      <button class="filter-pill" data-edtab="paste" onclick="edShowTab('paste', this)">Paste article</button>
+      <button class="filter-pill" data-edtab="upload" onclick="edShowTab('upload', this)">Upload PDF/photo</button>
+    </div>
+
+    <div id="edtab-notes" class="ed-pane active">
+      <div class="ed-form-row">
+        <select id="ed-brief-brand"><option value="">Both brands</option><option value="auctionbrain">AuctionBrain</option><option value="bridgematch">BridgeMatch</option></select>
+        <input type="text" id="ed-brief-topic" placeholder="Topic (optional)">
+      </div>
+      <textarea id="ed-brief-message" rows="3" placeholder="Notes for a future post — angle, data point, story&hellip;"></textarea>
+      <button class="btn btn-approve" onclick="edSubmitBrief(this)">Save brief</button>
+    </div>
+
+    <div id="edtab-paste" class="ed-pane">
+      <div class="ed-form-row">
+        <select id="ed-seed-brand"><option value="">Both brands</option><option value="auctionbrain">AuctionBrain</option><option value="bridgematch">BridgeMatch</option></select>
+        <input type="text" id="ed-seed-title" placeholder="Title (optional)">
+      </div>
+      <textarea id="ed-seed-content" rows="5" placeholder="Paste article text or research here&hellip;"></textarea>
+      <button class="btn btn-approve" onclick="edSubmitSeed(this)">Save as source</button>
+    </div>
+
+    <div id="edtab-upload" class="ed-pane">
+      <div class="ed-form-row">
+        <select id="ed-upload-brand"><option value="">Both brands</option><option value="auctionbrain">AuctionBrain</option><option value="bridgematch">BridgeMatch</option></select>
+      </div>
+      <div class="upload-zone" id="ed-upload-zone" onclick="document.getElementById('ed-upload-input').click()">
+        <p>📄 Click to upload or drag a PDF / photo here</p>
+        <p class="hint">PDF, JPG, PNG, WebP — content is extracted with Claude</p>
+      </div>
+      <input type="file" id="ed-upload-input" accept=".pdf,image/*" style="display:none" onchange="edHandleFile(this)">
+      <div id="ed-upload-status"></div>
+      <pre id="ed-extracted" class="extracted-preview" style="display:none"></pre>
+      <div id="ed-upload-save" style="display:none">
+        <input type="text" id="ed-upload-title" placeholder="Title for this content">
+        <button class="btn btn-approve" onclick="edSaveExtracted(this)">Save as source</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="design-section">
+    <div class="section-head"><h3>Brief queue</h3>
+      <p class="section-sub">Queued ideas the next generation runs will draw on.</p>
+      <span>
+        <button class="btn btn-save btn-tiny" onclick="edRedditRefresh(this)" title="Pull high-engagement Reddit threads into the brief queue">⟲ From Reddit</button>
+        <button class="btn btn-save btn-tiny" hx-get="/dashboard/editorial/briefs" hx-target="#editorial-briefs" hx-swap="outerHTML">↻ Refresh</button>
+      </span>
+    </div>
+    <div id="editorial-briefs" hx-get="/dashboard/editorial/briefs" hx-trigger="load" hx-swap="outerHTML">
+      <p class="loading">Loading&hellip;</p>
+    </div>
+  </section>
+</section>
+
+<script>
+(function () {
+  if (window.__editorialWired) return;
+  window.__editorialWired = true;
+
+  async function api(method, path, body) {
+    const opts = { method, credentials: 'include', headers: { 'Content-Type': 'application/json' } };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    const json = await res.json().catch(function () { return {}; });
+    if (!res.ok) throw new Error(json.error || ('HTTP ' + res.status));
+    return json;
+  }
+
+  function status(id, msg, isErr) {
+    const el = document.getElementById('ed-status-' + id);
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'status-bar show ' + (isErr ? 'err' : 'ok');
+    clearTimeout(el._t);
+    el._t = setTimeout(function () { el.className = 'status-bar'; }, 3500);
+  }
+
+  window.edShowTab = function (name, btn) {
+    document.querySelectorAll('.ed-pane').forEach(function (p) { p.classList.remove('active'); });
+    document.querySelectorAll('.ed-tabs .filter-pill').forEach(function (b) { b.classList.remove('active'); });
+    document.getElementById('edtab-' + name).classList.add('active');
+    btn.classList.add('active');
+  };
+
+  window.edApprove = async function (brand, id, btn) {
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/approve/' + encodeURIComponent(brand) + '/' + encodeURIComponent(id));
+      const card = document.getElementById('draft-' + id);
+      if (card) { card.classList.add('dismissed'); setTimeout(function () { card.remove(); }, 320); }
+    } catch (err) { btn.disabled = false; status(id, '✗ ' + err.message, true); }
+  };
+
+  window.edToggleReject = function (id) {
+    const box = document.getElementById('ed-reject-' + id);
+    if (box) box.classList.toggle('open');
+  };
+
+  window.edReject = async function (brand, id, btn) {
+    const box = document.getElementById('ed-reject-' + id);
+    const feedback = box ? (box.querySelector('textarea') || {}).value : '';
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/reject/' + encodeURIComponent(brand) + '/' + encodeURIComponent(id), { feedback: (feedback || '').trim() });
+      const card = document.getElementById('draft-' + id);
+      if (card) { card.classList.add('dismissed'); setTimeout(function () { card.remove(); }, 320); }
+    } catch (err) { btn.disabled = false; status(id, '✗ ' + err.message, true); }
+  };
+
+  window.edToggleAmend = async function (brand, id, btn) {
+    const form = document.getElementById('ed-amend-' + id);
+    if (form.classList.contains('open')) { form.classList.remove('open'); return; }
+    form.classList.add('open');
+    if (form.dataset.loaded) return;
+    btn.disabled = true;
+    form.textContent = 'Loading full draft…';
+    try {
+      const out = await api('GET', '/api/content/blog/' + encodeURIComponent(brand) + '/' + encodeURIComponent(id));
+      const post = out.post || {};
+      form.textContent = '';
+      const make = function (label, tag, value, attrs) {
+        const wrap = document.createElement('div');
+        wrap.className = 'amend-field';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        const el = document.createElement(tag);
+        if (tag === 'input') el.type = 'text';
+        Object.assign(el, attrs || {});
+        el.value = value || '';
+        wrap.appendChild(lbl); wrap.appendChild(el);
+        form.appendChild(wrap);
+        return el;
+      };
+      const title = make('Title', 'input', post.title);
+      const summary = make('Summary', 'textarea', post.summary, { rows: 2 });
+      const body = make('Body (markdown)', 'textarea', post.content_md, { rows: 12 });
+      const row = document.createElement('div');
+      row.className = 'btn-row';
+      const save = document.createElement('button');
+      save.className = 'btn btn-approve';
+      save.textContent = 'Save changes';
+      save.onclick = async function () {
+        save.disabled = true; save.textContent = 'Saving…';
+        try {
+          const res = await api('PATCH', '/api/content/blog/' + encodeURIComponent(brand) + '/' + encodeURIComponent(id),
+            { title: title.value, summary: summary.value, content_md: body.value });
+          const card = document.getElementById('draft-' + id);
+          const t = card && card.querySelector('.draft-title');
+          if (t) t.textContent = (res.post && res.post.title) || '(untitled)';
+          status(id, '✓ Changes saved — approve when ready');
+        } catch (err) { status(id, '✗ ' + err.message, true); }
+        finally { save.disabled = false; save.textContent = 'Save changes'; }
+      };
+      const close = document.createElement('button');
+      close.className = 'btn btn-save';
+      close.textContent = 'Close';
+      close.onclick = function () { form.classList.remove('open'); };
+      row.appendChild(save); row.appendChild(close);
+      form.appendChild(row);
+      form.dataset.loaded = '1';
+    } catch (err) {
+      form.textContent = 'Failed to load: ' + err.message;
+    } finally { btn.disabled = false; }
+  };
+
+  window.edSubmitBrief = async function (btn) {
+    const message = document.getElementById('ed-brief-message').value.trim();
+    if (!message) return;
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/brief', {
+        message: message,
+        brand: document.getElementById('ed-brief-brand').value || null,
+        topic: document.getElementById('ed-brief-topic').value.trim() || null,
+      });
+      document.getElementById('ed-brief-message').value = '';
+      document.getElementById('ed-brief-topic').value = '';
+      htmx.ajax('GET', '/dashboard/editorial/briefs', { target: '#editorial-briefs', swap: 'outerHTML' });
+    } catch (err) { alert(err.message); }
+    finally { btn.disabled = false; }
+  };
+
+  window.edSubmitSeed = async function (btn) {
+    const content = document.getElementById('ed-seed-content').value.trim();
+    if (!content) return;
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/seed', {
+        content: content,
+        brand: document.getElementById('ed-seed-brand').value || null,
+        title: document.getElementById('ed-seed-title').value.trim() || null,
+      });
+      document.getElementById('ed-seed-content').value = '';
+      document.getElementById('ed-seed-title').value = '';
+      btn.textContent = 'Saved ✓';
+      setTimeout(function () { btn.textContent = 'Save as source'; }, 2000);
+    } catch (err) { alert(err.message); }
+    finally { btn.disabled = false; }
+  };
+
+  window.edDismissBrief = async function (id, btn) {
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/brief/' + encodeURIComponent(id) + '/dismiss');
+      const card = document.getElementById('brief-' + id);
+      if (card) card.remove();
+    } catch (err) { btn.disabled = false; alert(err.message); }
+  };
+
+  window.edRedditRefresh = async function (btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Scanning Reddit…';
+    try {
+      const result = await api('POST', '/api/content/refresh-reddit-briefs');
+      btn.textContent = result.promoted > 0 ? ('Added ' + result.promoted + ' ✓') : 'No new briefs';
+      htmx.ajax('GET', '/dashboard/editorial/briefs', { target: '#editorial-briefs', swap: 'outerHTML' });
+      setTimeout(function () { btn.textContent = original; }, 2500);
+    } catch (err) {
+      btn.textContent = original;
+      alert(err.message);
+    } finally { btn.disabled = false; }
+  };
+
+  // Upload (FileReader → base64 → JSON; same mechanism as the legacy page)
+  var extractedText = '';
+  var extractedFilename = '';
+
+  var zone = document.getElementById('ed-upload-zone');
+  if (zone) {
+    zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('dragging'); });
+    zone.addEventListener('dragleave', function () { zone.classList.remove('dragging'); });
+    zone.addEventListener('drop', function (e) {
+      e.preventDefault(); zone.classList.remove('dragging');
+      const f = e.dataTransfer.files[0];
+      if (f) edProcessFile(f);
+    });
+  }
+
+  window.edHandleFile = function (input) {
+    const f = input.files[0];
+    if (f) edProcessFile(f);
+  };
+
+  async function edProcessFile(file) {
+    const statusEl = document.getElementById('ed-upload-status');
+    const preview = document.getElementById('ed-extracted');
+    const saveRow = document.getElementById('ed-upload-save');
+    statusEl.textContent = 'Extracting content via Claude…';
+    preview.style.display = 'none';
+    saveRow.style.display = 'none';
+    extractedText = '';
+    extractedFilename = file.name;
+    try {
+      const base64 = await new Promise(function (resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function () { resolve(reader.result.split(',')[1]); };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const out = await api('POST', '/api/content/upload', { mimeType: file.type, data: base64, filename: file.name });
+      extractedText = out.extracted;
+      statusEl.textContent = '✓ Extracted from ' + file.name;
+      preview.textContent = out.extracted;
+      preview.style.display = 'block';
+      document.getElementById('ed-upload-title').value = file.name.replace(/\.[^.]+$/, '');
+      saveRow.style.display = 'block';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  window.edSaveExtracted = async function (btn) {
+    if (!extractedText) return;
+    btn.disabled = true;
+    try {
+      await api('POST', '/api/content/seed', {
+        content: extractedText,
+        title: document.getElementById('ed-upload-title').value.trim() || extractedFilename,
+        brand: document.getElementById('ed-upload-brand').value || null,
+      });
+      document.getElementById('ed-upload-save').style.display = 'none';
+      document.getElementById('ed-extracted').style.display = 'none';
+      document.getElementById('ed-upload-status').textContent = 'Saved as source ✓';
+      document.getElementById('ed-upload-input').value = '';
+      extractedText = '';
+    } catch (err) { alert(err.message); }
+    finally { btn.disabled = false; }
+  };
+})();
+</script>
