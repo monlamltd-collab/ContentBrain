@@ -912,3 +912,10 @@ main {
 .live-blogs li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .live-blogs a { color: #1a6fb5; text-decoration: none; }
 .live-blogs a:hover { text-decoration: underline; }
+
+/* ── Studio creative settings row (PR2: duration / theme / music) ── */
+.studio-settings { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; background: #faf8f4; border: 1px solid #f0eeea; border-radius: 8px; padding: 8px 10px; }
+.studio-settings label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
+.studio-settings input[type="number"] { width: 72px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1.5px solid #e2dfd8; border-radius: 6px; }
+.studio-settings select { font: inherit; font-size: 13px; padding: 6px 8px; border: 1.5px solid #e2dfd8; border-radius: 6px; max-width: 170px; }
+.studio-settings input:focus, .studio-settings select:focus { outline: none; border-color: #0f8a5f; }
