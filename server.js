@@ -1,9 +1,8 @@
 require('dotenv').config();
-const { createLLM } = require('./lib/llm');
 const express = require('express');
 const path = require('path');
 const { timingSafeEqual, scryptSync, createHmac } = require('crypto');
-const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveBrief, saveSeed, getDraftBlogPosts, updateBlogPostStatus, getBlogPostById, getPublishedBlogPostsBothBrands, getPendingBriefsAll, dismissBrief } = require('./lib/supabase');
+const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveSeed, updateBlogPostStatus } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendNotification, API, BOT_TOKEN } = require('./lib/telegram');
 const reviewRouter = require('./lib/review-api');
@@ -11,15 +10,6 @@ const runtimeConfig = require('./lib/runtime-config');
 const { brands: defaultBrands, templateTypes } = require('./lib/config');
 const { registerCronJobs, runGenerate } = require('./lib/cron-jobs');
 const telegramHandlers = require('./lib/telegram-handlers');
-
-// HTML-escape user-supplied strings before echoing them in Telegram
-// notifications (sendNotification uses parse_mode HTML).
-function escapeHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -183,7 +173,12 @@ async function handleUnsubscribe(req, res) {
 app.get('/u', handleUnsubscribe);
 app.post('/u', express.urlencoded({ extended: false }), handleUnsubscribe);
 
-app.use(express.json());
+// 30mb limit: the Editorial upload flow posts base64-encoded PDFs/photos as
+// JSON to /api/content/upload. The Express default (100kb) rejected any real
+// document with a 413 before the route ever saw it — and since this parser
+// consumes the stream first, a route-scoped parser can't raise it. Internal
+// single-operator app behind auth; the larger limit is acceptable.
+app.use(express.json({ limit: '30mb' }));
 app.use('/output', express.static(path.join(__dirname, 'output')));
 
 // Cookie parser — MUST run before any route or middleware that reads req.cookies
@@ -422,355 +417,25 @@ function loginPage(error, returnTo = '/') {
 </body></html>`;
 }
 
-function dashboardPage(socialPosts, blogPosts, filter) {
-  const socialCards = socialPosts.map(post => `
-    <div class="card" id="card-${post.id}" data-type="social">
-      <div class="card-header">
-        <span class="badge brand-${post.brand}">${post.brand}</span>
-        <span class="badge platform">${post.platform}</span>
-        <span class="badge template">${post.template_type}</span>
-      </div>
-      ${post.image_url ? `<img src="/output/${post.image_url}" class="preview" alt="preview">` : ''}
-      ${post.video_url ? `<div class="video-wrap"><video src="/output/${post.video_url}" class="preview" controls muted preload="metadata"></video><span class="video-badge">MP4</span></div>` : ''}
-      <div class="copy">
-        <strong>${escapeHtml(post.copy_headline || '')}</strong>
-        <p>${escapeHtml(post.copy_body || '')}</p>
-        ${post.copy_cta ? `<p class="cta">${escapeHtml(post.copy_cta)}</p>` : ''}
-      </div>
-      <div class="actions">
-        <button class="btn approve" onclick="action('${post.id}','approve','social')">Approve</button>
-        <button class="btn reject" onclick="action('${post.id}','reject','social')">Reject</button>
-      </div>
-    </div>
-  `).join('');
+// dashboardPage() (the legacy inline review UI) was removed in the
+// editorial-port PR — everything lives in /dashboard now.
 
-  const filteredBlogPosts = (filter === 'blog') ? blogPosts.filter(p => (p.post_type || 'blog') === 'blog')
-    : (filter === 'guide') ? blogPosts.filter(p => p.post_type === 'guide')
-    : blogPosts;
-
-  const blogCards = filteredBlogPosts.map(post => {
-    const postType = post.post_type || 'blog';
-    const brandLabel = post.brand === 'bridgematch' ? 'bridgematch' : 'auctionbrain';
-    const preview = (post.summary || post.meta_description || '').slice(0, 200);
-    return `
-    <div class="card" id="card-${post.id}" data-type="${postType}">
-      <div class="card-header">
-        <span class="badge brand-${brandLabel}">${brandLabel}</span>
-        <span class="badge type-badge">${postType}</span>
-        ${post.evaluation_score ? `<span class="badge score">${post.evaluation_score}/10</span>` : ''}
-      </div>
-      <div class="copy">
-        <strong>${escapeHtml(post.title || '')}</strong>
-        ${post.word_count || post.content ? `<p class="meta-info">${post.content ? Math.round(post.content.split(/\\s+/).length) + ' words' : ''}</p>` : ''}
-        <p>${escapeHtml(preview)}</p>
-        ${post.tags && post.tags.length ? `<p class="tags">${post.tags.map(t => '#' + t).join(' ')}</p>` : ''}
-      </div>
-      <div class="actions">
-        <button class="btn approve" onclick="action('${post.id}','approve','blog')">Approve</button>
-        <button class="btn reject" onclick="action('${post.id}','reject','blog')">Reject</button>
-      </div>
-    </div>
-  `;
-  }).join('');
-
-  const totalCount = socialPosts.length + filteredBlogPosts.length;
-  const filterParam = (f) => f === 'all' ? '/' : `/?type=${f}`;
-  const activeClass = (f) => f === filter ? 'tab active' : 'tab';
-
-  return `<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ContentBrain — Review</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; padding: 24px; }
-  h1 { font-size: 28px; color: #1a2b4b; margin-bottom: 8px; }
-  .subtitle { color: #666; margin-bottom: 16px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
-  .tab { padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; text-decoration: none; color: #666; background: #e8e8e8; transition: all 0.2s; }
-  .tab:hover { background: #ddd; }
-  .tab.active { background: #1a2b4b; color: #faf8f4; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 24px; }
-  .card { background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); transition: opacity 0.3s; }
-  .card.done { opacity: 0.3; pointer-events: none; }
-  .card-header { padding: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
-  .badge { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.03em; }
-  .brand-auctionbrain { background: #1a2b4b; color: #faf8f4; }
-  .brand-bridgematch { background: #0f8a5f; color: #fff; }
-  .platform { background: #e8e8e8; color: #333; }
-  .template { background: #fdf2e9; color: #C0392B; }
-  .type-badge { background: #e8f4fd; color: #1a6fb5; }
-  .score { background: #e8fdf0; color: #0f8a5f; }
-  .preview { width: 100%; aspect-ratio: 1; object-fit: cover; }
-  .video-wrap { position: relative; }
-  .video-wrap video { width: 100%; aspect-ratio: 1; object-fit: cover; background: #000; }
-  .video-badge { position: absolute; top: 8px; right: 8px; background: #C0392B; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
-  .copy { padding: 16px; }
-  .copy strong { display: block; font-size: 18px; color: #1a2b4b; margin-bottom: 8px; }
-  .copy p { color: #555; line-height: 1.5; margin-bottom: 8px; white-space: pre-line; }
-  .copy .cta { color: #0f8a5f; font-weight: 500; }
-  .copy .meta-info { font-size: 13px; color: #999; }
-  .copy .tags { font-size: 12px; color: #888; }
-  .actions { padding: 16px; display: flex; gap: 12px; border-top: 1px solid #eee; }
-  .btn { flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .btn.approve { background: #0f8a5f; color: #fff; }
-  .btn.approve:hover { background: #0d7a54; }
-  .btn.reject { background: #f5f5f5; color: #C0392B; border: 1px solid #eee; }
-  .btn.reject:hover { background: #fde8e8; }
-  .empty { text-align: center; color: #999; padding: 80px; font-size: 18px; }
-</style>
-</head><body>
-  <h1>ContentBrain</h1>
-  <p class="subtitle">${totalCount} draft${totalCount !== 1 ? 's' : ''} awaiting review</p>
-  <div class="tabs">
-    <a class="${activeClass('all')}" href="${filterParam('all')}">All</a>
-    <a class="${activeClass('social')}" href="${filterParam('social')}">Social</a>
-    <a class="${activeClass('blog')}" href="${filterParam('blog')}">Blog</a>
-    <a class="${activeClass('guide')}" href="${filterParam('guide')}">Guide</a>
-  </div>
-  <div class="grid">
-    ${totalCount ? socialCards + blogCards : '<div class="empty">No drafts to review. All clear.</div>'}
-  </div>
-  <script>
-    async function action(id, type, contentKind) {
-      const card = document.getElementById('card-' + id);
-      const endpoint = contentKind === 'blog' ? '/api/blog-posts/' : '/api/posts/';
-      try {
-        const res = await fetch(endpoint + id + '/' + type, { method: 'POST' });
-        if (res.ok) {
-          card.classList.add('done');
-          setTimeout(() => card.remove(), 500);
-          const remaining = document.querySelectorAll('.card:not(.done)').length;
-          document.querySelector('.subtitle').textContent = remaining + ' draft' + (remaining !== 1 ? 's' : '') + ' awaiting review';
-        }
-      } catch (err) { alert('Error: ' + err.message); }
-    }
-  </script>
-</body></html>`;
-}
-
-function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 
 // ── CRON JOBS ── (moved to lib/cron-jobs.js — registered at startup below)
 registerCronJobs();
 
 // ── TELEGRAM BOT POLLING ── (moved to lib/telegram-handlers/ — started in app.listen below)
 
-// ── EDITORIAL DASHBOARD ──────────────────────────────────────────────────────
+// ── EDITORIAL DASHBOARD ─────────────────────────────────────────────────────
 
-const _llmForEditorial = createLLM();
-const SUPPORTED_IMAGE_TYPES_ED = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-
+// Consolidated into the dashboard Editorial tab.
 app.get('/content', requireAuth, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'editorial.html'));
+  res.redirect(302, '/dashboard?tab=editorial');
 });
 
-app.get('/api/content/coverage', requireAuth, async (req, res) => {
-  try {
-    const posts = await getPublishedBlogPostsBothBrands();
-    const brand = req.query.brand; // optional filter
-
-    const filtered = brand ? posts.filter(p => p.brand === brand) : posts;
-
-    // Build tag frequency map
-    const tagCount = {};
-    for (const post of filtered) {
-      const tags = Array.isArray(post.tags) ? post.tags : [];
-      for (const tag of tags) {
-        tagCount[tag] = (tagCount[tag] || 0) + 1;
-      }
-    }
-
-    // Classify: 0 = gap, 1-2 = covered, 3+ = saturated
-    const coverage = Object.entries(tagCount)
-      .map(([tag, count]) => ({
-        tag,
-        count,
-        status: count >= 3 ? 'saturated' : 'covered'
-      }))
-      .sort((a, b) => b.count - a.count);
-
-    res.json({ posts: filtered.length, coverage });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/content/queue', requireAuth, async (req, res) => {
-  try {
-    const drafts = await getDraftBlogPosts();
-    res.json({ drafts });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/content/briefs', requireAuth, async (req, res) => {
-  try {
-    const briefs = await getPendingBriefsAll();
-    res.json({ briefs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/content/brief', requireAuth, async (req, res) => {
-  try {
-    const { brand, message, topic, angle } = req.body;
-    if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
-    const brief = await saveBrief({ brand: brand || null, message: message.trim(), topic: topic || null, angle: angle || null });
-    res.json({ ok: true, brief });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Manual trigger for the Reddit-thread → brief promotion. Same logic as
-// the daily cron at 06:30 UTC, exposed so the editor can pull fresh briefs
-// on demand from the Brief Queue panel.
-app.post('/api/content/refresh-reddit-briefs', requireAuth, async (req, res) => {
-  try {
-    const { promoteRedditThreadsToBriefs } = require('./lib/reddit-briefs');
-    const result = await promoteRedditThreadsToBriefs();
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/content/brief/:id/dismiss', requireAuth, async (req, res) => {
-  try {
-    await dismissBrief(req.params.id);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/content/seed', requireAuth, async (req, res) => {
-  try {
-    const { brand, content, title } = req.body;
-    if (!content?.trim()) return res.status(400).json({ error: 'content is required' });
-    const seed = await saveSeed({ brand: brand || null, content: content.trim(), title: title?.trim() || null });
-    res.json({ ok: true, seed });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Accepts { mimeType, data (base64), filename } — extracts content via Claude
-app.post('/api/content/upload', requireAuth, async (req, res) => {
-  try {
-    const { mimeType, data, filename } = req.body;
-    if (!data) return res.status(400).json({ error: 'data (base64) is required' });
-
-    const isPdf = mimeType === 'application/pdf';
-    const isImage = SUPPORTED_IMAGE_TYPES_ED.includes(mimeType);
-    if (!isPdf && !isImage) return res.status(400).json({ error: `Unsupported type: ${mimeType}` });
-
-    const contentBlock = isPdf
-      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } }
-      : { type: 'image', source: { type: 'base64', media_type: mimeType, data } };
-
-    const response = await _llmForEditorial.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      messages: [{
-        role: 'user',
-        content: [
-          contentBlock,
-          { type: 'text', text: 'Extract all useful editorial content from this document — headlines, article text, statistics, quotes, opinions. Format as clean markdown. Skip ads, subscription offers, navigation, and page numbers.' }
-        ]
-      }]
-    });
-
-    const extracted = response.content[0]?.text || '';
-    if (extracted.length < 20) return res.status(422).json({ error: 'Could not extract readable content' });
-
-    res.json({ ok: true, extracted, filename });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Fetch the full blog post so the editor can amend it before approving.
-// Returns the row including content_md/content_html — heavier than the
-// queue listing, but only fired when the editor actually opens the amend form.
-app.get('/api/content/blog/:brand/:id', requireAuth, async (req, res) => {
-  try {
-    const { brand, id } = req.params;
-    const post = await getBlogPostById(id, brand);
-    res.json({ post });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Amend a draft blog post in-place. Updates whichever of title / summary /
-// content_md were sent in the body. content_html is regenerated from the
-// new content_md so the published version stays in sync — the landing
-// site renders content_html, not content_md.
-app.patch('/api/content/blog/:brand/:id', requireAuth, async (req, res) => {
-  try {
-    const { brand, id } = req.params;
-    const { title, summary, content_md } = req.body;
-    const updates = {};
-    if (typeof title === 'string') {
-      if (!title.trim()) return res.status(400).json({ error: 'title cannot be empty' });
-      if (title.length > 200) return res.status(400).json({ error: 'title too long (max 200)' });
-      updates.title = title.trim();
-    }
-    if (typeof summary === 'string') {
-      if (summary.length > 500) return res.status(400).json({ error: 'summary too long (max 500)' });
-      updates.summary = summary.trim();
-    }
-    if (typeof content_md === 'string') {
-      if (!content_md.trim()) return res.status(400).json({ error: 'content cannot be empty' });
-      if (content_md.length > 50000) return res.status(400).json({ error: 'content too long (max 50k)' });
-      updates.content_md = content_md;
-      // Regenerate content_html from the amended markdown so the landing
-      // site (which reads content_html) doesn't fall behind.
-      try {
-        const { marked } = require('marked');
-        updates.content_html = marked.parse(content_md);
-      } catch (mdErr) {
-        return res.status(500).json({ error: `markdown render failed: ${mdErr.message}` });
-      }
-    }
-    if (!Object.keys(updates).length) return res.status(400).json({ error: 'No editable fields provided' });
-
-    const { getBlogClient } = require('./lib/supabase');
-    const client = getBlogClient(brand);
-    const { data, error } = await client.from('blog_posts').update(updates).eq('id', id).select().single();
-    if (error) throw new Error(error.message);
-    res.json({ ok: true, post: data, updated: Object.keys(updates) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/content/approve/:brand/:id', requireAuth, async (req, res) => {
-  try {
-    const { brand, id } = req.params;
-    await updateBlogPostStatus(id, 'approved', {}, brand);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/content/reject/:brand/:id', requireAuth, async (req, res) => {
-  try {
-    const { brand, id } = req.params;
-    const { feedback } = req.body;
-    await updateBlogPostStatus(id, 'rejected', { revision_feedback: feedback || '' }, brand);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+// /api/content/* JSON endpoints — extracted verbatim to routes/api-content.js
+// (pure move). Shared by the Editorial tab.
+app.use('/api/content', requireAuth, require('./routes/api-content'));
 
 // ── SOCIAL DASHBOARD ─────────────────────────────────────────────────────────
 

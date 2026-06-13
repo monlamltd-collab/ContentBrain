@@ -19,6 +19,7 @@ const router = express.Router();
 // Sub-route partials
 router.use('/today',       require('./today'));
 router.use('/studio',      require('./studio'));
+router.use('/editorial',   require('./editorial'));
 router.use('/approve',     require('./approve'));
 router.use('/performance', require('./performance'));
 router.use('/pipeline',    require('./pipeline'));
