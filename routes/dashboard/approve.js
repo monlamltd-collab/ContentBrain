@@ -318,12 +318,6 @@ function renderBulkSummary({ approved, suppressed, deferred, errored, total, sel
   return `<div class="bulk-summary">${lines.join('')}<ul class="bulk-details">${detailRows}</ul></div>`;
 }
 
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+const { escHtml } = require('../../lib/dashboard/html');
 
 module.exports = router;

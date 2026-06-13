@@ -60,12 +60,6 @@ router.get('/', (req, res) => {
   }
 });
 
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+const { escHtml } = require('../../lib/dashboard/html');
 
 module.exports = router;

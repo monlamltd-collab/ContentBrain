@@ -12,35 +12,50 @@
   <header class="site-header">
     <h1>ContentBrain</h1>
     <nav class="tabs" role="tablist">
-      <button class="tab active"
+      <button class="tab active" data-tab="approve"
         role="tab"
         hx-get="/dashboard/today"
         hx-target="#tab-content"
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Approve</button>
-      <button class="tab"
+      <button class="tab" data-tab="studio"
+        role="tab"
+        hx-get="/dashboard/studio"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Studio</button>
+      <button class="tab" data-tab="queue"
         role="tab"
         hx-get="/dashboard/approve"
         hx-target="#tab-content"
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Queue</button>
-      <button class="tab"
+      <a class="tab" data-tab="editorial" href="/content">Editorial</a>
+      <button class="tab" data-tab="performance"
         role="tab"
         hx-get="/dashboard/performance"
         hx-target="#tab-content"
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Performance</button>
-      <button class="tab"
+      <button class="tab" data-tab="pipeline"
         role="tab"
         hx-get="/dashboard/pipeline"
         hx-target="#tab-content"
         hx-swap="innerHTML"
         hx-push-url="false"
         onclick="setActive(this)">Pipeline</button>
-      <button class="tab"
+      <button class="tab" data-tab="design"
+        role="tab"
+        hx-get="/dashboard/design"
+        hx-target="#tab-content"
+        hx-swap="innerHTML"
+        hx-push-url="false"
+        onclick="setActive(this)">Design</button>
+      <button class="tab" data-tab="settings"
         role="tab"
         hx-get="/dashboard/settings"
         hx-target="#tab-content"
@@ -62,6 +77,21 @@
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
     }
+
+    // Deep-linking: /dashboard?tab=studio opens that tab on load. Runs
+    // synchronously BEFORE HTMX initializes, rewriting #tab-content's
+    // hx-get so the single load-triggered request fetches the right tab
+    // (clicking after load would race the default Approve fetch).
+    (function () {
+      var tab = new URLSearchParams(location.search).get('tab');
+      if (!tab) return;
+      var btn = document.querySelector('.tab[data-tab="' + CSS.escape(tab) + '"]');
+      if (btn && btn.tagName === 'BUTTON' && btn.getAttribute('hx-get')) {
+        document.getElementById('tab-content').setAttribute('hx-get', btn.getAttribute('hx-get'));
+        document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+        btn.classList.add('active');
+      }
+    })();
 
     // Settings tab — live update for char counters + range sliders.
     // Delegated input listener so it works for HTMX-swapped controls too.

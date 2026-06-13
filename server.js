@@ -330,17 +330,11 @@ app.get('/api/dashboard/performance/metrics', requireAuth, async (req, res) => {
 });
 
 // ── DASHBOARD (legacy review UI at /) ──
-app.get('/', requireAuth, async (req, res) => {
-  try {
-    const filter = req.query.type || 'all';
-    const [socialPosts, blogPosts] = await Promise.all([
-      filter === 'blog' || filter === 'guide' ? Promise.resolve([]) : getDraftPosts(),
-      filter === 'social' ? Promise.resolve([]) : getDraftBlogPosts()
-    ]);
-    res.send(dashboardPage(socialPosts, blogPosts, filter));
-  } catch (err) {
-    res.status(500).send(`Error: ${err.message}`);
-  }
+// The legacy inline dashboard is consolidated into /dashboard (Studio,
+// Design, Editorial tabs). dashboardPage() is removed in the editorial-port
+// PR; until then the root simply forwards.
+app.get('/', requireAuth, (req, res) => {
+  res.redirect(302, '/dashboard');
 });
 
 // ── APPROVE / REJECT ──
@@ -789,8 +783,9 @@ function safeFilename(name) {
   return name.replace(/[\\/]/g, '').replace(/^\.+/, '');
 }
 
+// Consolidated into the dashboard Studio tab.
 app.get('/social', requireAuth, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'social.html'));
+  res.redirect(302, '/dashboard?tab=studio');
 });
 
 app.get('/api/social/queue', requireAuth, async (req, res) => {
@@ -897,8 +892,9 @@ app.post('/api/social/posts/:id/rerender', requireAuth, async (req, res) => {
 // is just HTML + vanilla JS — no framework, no build step. All state lives
 // in app_config; this layer is purely a UI on top of runtime-config.
 
+// Consolidated into the dashboard Design tab.
 app.get('/levers', requireAuth, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'levers.html'));
+  res.redirect(302, '/dashboard?tab=design');
 });
 
 // Full snapshot of every lever value, plus the menus the UI needs to render
@@ -1026,54 +1022,15 @@ app.get('/api/levers/live-blogs', requireAuth, async (req, res) => {
 app.post('/api/levers/pattern/draft', requireAuth, async (req, res) => {
   try {
     const { type, idea } = req.body || {};
-    if (type !== 'hook' && type !== 'cta') return res.status(400).json({ error: 'type must be "hook" or "cta"' });
-    if (!idea || typeof idea !== 'string' || !idea.trim()) return res.status(400).json({ error: 'idea required' });
-
-    const runtimeConfig = require('./lib/runtime-config');
-    const existing = type === 'hook' ? await runtimeConfig.getHookPatterns() : await runtimeConfig.getCtaPatterns();
-    const brand = await runtimeConfig.getResolvedBrand('auctionbrain');
-
-    const examples = existing.slice(0, 8).map(p => `- ${p.body}`).join('\n');
-
-    const formatGuide = type === 'hook'
-      ? `Each pattern is a single line: "NAME — short description with a concrete example in parentheses or quotes". The NAME is 2–4 words in CAPS. The description names the rhetorical move. The example is a specific, plausible UK property auction sentence.`
-      : `Each pattern is a single line: "NAME — short description, then a quoted CTA example pointing at auctionbrain.co.uk or bridgematch.co.uk". The NAME is 2–4 words in CAPS. The example must promise something specific (not a bare URL).`;
-
-    const system = `You design ${type === 'hook' ? 'hook' : 'CTA'} patterns for a UK property auction social-content pipeline (AuctionBrain).
-AUDIENCE: ${brand.audience}
-TONE: ${brand.tone}
-
-${formatGuide}
-Return ONE pattern body only — no preamble, no markdown, no surrounding quotes, no numbered label, just the pattern line itself.`;
-
-    const user = `Existing patterns (do not duplicate the rhetorical move of any of these):
-${examples}
-
-The operator wants a new pattern based on this rough idea:
-"${idea.trim()}"
-
-Write ONE new pattern in the existing format. Output the pattern body only.`;
-
-    const response = await createLLM().messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 250,
-      system,
-      messages: [{ role: 'user', content: user }],
-    });
-
-    const text = (response.content || []).find(b => b.type === 'text')?.text || '';
-    // Strip surrounding quotes/whitespace and any numeric/letter prefix Claude might prepend.
-    const suggestion = text
-      .trim()
-      .replace(/^["']|["']$/g, '')
-      .replace(/^[0-9]+[.)]\s+/, '')
-      .replace(/^[A-Z][.)]\s+/, '')
-      .trim();
-    if (!suggestion) return res.status(502).json({ error: 'Claude returned an empty draft' });
+    // Shared with the dashboard Design tab — single source of truth for the
+    // prompt logic lives in lib/dashboard/design-queries.draftPattern.
+    const { draftPattern } = require('./lib/dashboard/design-queries');
+    const suggestion = await draftPattern(type, idea);
     res.json({ suggestion });
   } catch (err) {
-    console.error('[POST /api/levers/pattern/draft] error:', err.message);
-    res.status(500).json({ error: err.message });
+    const isInput = /must be|required/.test(err.message);
+    if (!isInput) console.error('[POST /api/levers/pattern/draft] error:', err.message);
+    res.status(isInput ? 400 : 500).json({ error: err.message });
   }
 });
 
