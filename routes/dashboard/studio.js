@@ -24,6 +24,8 @@ const render = require('../../lib/dashboard/studio-render');
 const { errorFlash } = require('../../lib/dashboard/html');
 const { THEME_NAMES } = require('../../lib/themes');
 const { MIN_DURATION_SECONDS, MAX_DURATION_SECONDS } = require('../../lib/video-renderer');
+const hf = require('../../lib/dashboard/studio-higgsfield');
+const hfRender = require('../../lib/dashboard/studio-higgsfield-render');
 
 const TEMPLATE_PATH = path.join(__dirname, 'studio.html');
 let TEMPLATE_CACHE = null;
@@ -116,6 +118,92 @@ router.get('/posts/:id/card', async (req, res) => {
   } catch (err) {
     console.error('[dashboard/studio] GET /posts/:id/card:', err.message);
     sendHtml(res, errorFlash(`Failed to load card: ${err.message}`), 500);
+  }
+});
+
+// ── Higgsfield AI media (PR3) ─────────────────────────────────────────────
+// All fragments; errors render inline in the job slot so the operator sees
+// exactly what happened without a toast layer.
+
+function jobError(res, postId, message, status = 400) {
+  res.status(status).set('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<div class="hf-job hf-error" id="hf-job-${postId}">✗ ${require('../../lib/dashboard/html').escHtml(message)}</div>`);
+}
+
+// LLM-drafted prompt → returns the filled textarea fragment.
+router.post('/posts/:id/prompt-draft', async (req, res) => {
+  const kind = (req.body || {}).kind === 'video' ? 'video' : 'image';
+  try {
+    const post = await queries.getPostRow(req.params.id);
+    if (!post) return sendHtml(res, errorFlash('Post not found.'), 404);
+    const prompt = await hf.draftPrompt(post, kind);
+    sendHtml(res, hfRender.renderPromptTextarea(req.params.id, prompt));
+  } catch (err) {
+    console.error('[dashboard/studio] prompt-draft:', err.message);
+    sendHtml(res, hfRender.renderPromptTextarea(req.params.id, `(draft failed: ${err.message.slice(0, 120)})`));
+  }
+});
+
+router.post('/posts/:id/generate-image', async (req, res) => {
+  const prompt = typeof (req.body || {}).prompt === 'string' ? req.body.prompt.trim() : '';
+  if (!prompt) return jobError(res, req.params.id, 'Write or prefill a prompt first.');
+  try {
+    const job = await hf.startImageJob(req.params.id, prompt);
+    sendHtml(res, hfRender.renderJobStatus(req.params.id, job));
+  } catch (err) {
+    jobError(res, req.params.id, err.message, 400);
+  }
+});
+
+router.post('/posts/:id/animate', async (req, res) => {
+  const body = req.body || {};
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+  if (!prompt) return jobError(res, req.params.id, 'Write or prefill a motion prompt first.');
+  try {
+    const job = await hf.startVideoJob(req.params.id, prompt, body.source || 'current');
+    sendHtml(res, hfRender.renderJobStatus(req.params.id, job));
+  } catch (err) {
+    jobError(res, req.params.id, err.message, 400);
+  }
+});
+
+// HTMX poll target — HTTP 286 stops the polling loop on terminal states.
+router.get('/posts/:id/jobs/:requestId/status', async (req, res) => {
+  try {
+    const { job, post } = await hf.refreshJob(req.params.id, req.params.requestId);
+    const terminal = ['completed', 'nsfw', 'failed', 'timed_out'].includes(job.status);
+    const html = renderJobAndMaybeVariants(req.params.id, job, post, terminal);
+    res.status(terminal ? 286 : 200).set('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[dashboard/studio] job status:', err.message);
+    res.status(286).set('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<div class="hf-job hf-error" id="hf-job-${req.params.id}">✗ ${require('../../lib/dashboard/html').escHtml(err.message)}</div>`);
+  }
+});
+
+function renderJobAndMaybeVariants(postId, job, post, terminal) {
+  let html = hfRender.renderJobStatus(postId, job);
+  if (terminal && job.status === 'completed') {
+    // Out-of-band swap refreshes the variant strip alongside the status.
+    const strip = hfRender.renderVariantStrip(post)
+      .replace('class="variant-strip"', 'class="variant-strip" hx-swap-oob="outerHTML"');
+    html += `\n${strip}`;
+  }
+  return html;
+}
+
+// Make a generated variant the live media — returns the whole refreshed card.
+router.post('/posts/:id/variants/use', async (req, res) => {
+  const variantId = (req.body || {}).variant;
+  if (!variantId) return sendHtml(res, errorFlash('No variant specified.'), 400);
+  try {
+    await hf.useVariant(req.params.id, variantId);
+    const post = await queries.getPostRow(req.params.id);
+    sendHtml(res, render.renderCard(post));
+  } catch (err) {
+    console.error('[dashboard/studio] variants/use:', err.message);
+    sendHtml(res, errorFlash(`Could not apply variant: ${err.message}`), 400);
   }
 });
 

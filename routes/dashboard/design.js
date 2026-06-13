@@ -258,6 +258,46 @@ router.post('/lot-schedule', async (req, res) => {
   }
 });
 
+// ── AI media (Higgsfield levers) ──────────────────────────────────────────
+
+router.post('/higgsfield/:brand', async (req, res) => {
+  const brand = req.params.brand;
+  if (!queries.BRAND_LIST.includes(brand)) return send400(res, `Unknown brand '${brand}'.`);
+  const body = req.body || {};
+  const stylePrefix = trim(body.style_prefix);
+  const aspect = trim(body.default_aspect);
+  if (stylePrefix.length > 400) return send400(res, `Style prefix is ${stylePrefix.length} chars; max 400.`);
+  if (aspect && !/^\d+:\d+$/.test(aspect)) return send400(res, `Aspect must look like 9:16.`);
+
+  try {
+    if (stylePrefix) await runtimeConfig.setLever(brand, 'higgsfield.style_prefix', stylePrefix);
+    else await runtimeConfig.clearLever(brand, 'higgsfield.style_prefix');
+    if (aspect) await runtimeConfig.setLever(brand, 'higgsfield.default_aspect', aspect);
+    else await runtimeConfig.clearLever(brand, 'higgsfield.default_aspect');
+
+    const fresh = await queries.getDesignSnapshot();
+    sendHtml(res, withSavedFlash(render.renderAiMediaSection(fresh)), 200, true);
+  } catch (err) {
+    console.error(`[dashboard/design] POST /higgsfield/${brand}:`, err.message);
+    send500(res, `Save failed: ${err.message}`);
+  }
+});
+
+router.post('/higgsfield-cap', async (req, res) => {
+  const cap = parseInt(trim((req.body || {}).daily_cap), 10);
+  if (!Number.isFinite(cap) || cap < 1 || cap > 200) {
+    return send400(res, 'Daily cap must be a whole number between 1 and 200.');
+  }
+  try {
+    await runtimeConfig.setLever('global', 'higgsfield.daily_cap', cap);
+    const fresh = await queries.getDesignSnapshot();
+    sendHtml(res, withSavedFlash(render.renderAiMediaSection(fresh)), 200, true);
+  } catch (err) {
+    console.error('[dashboard/design] POST /higgsfield-cap:', err.message);
+    send500(res, `Save failed: ${err.message}`);
+  }
+});
+
 // ── Manual triggers (fire-and-forget, same bodies as /api/triggers/*) ────
 
 router.post('/trigger/generate', (_req, res) => {

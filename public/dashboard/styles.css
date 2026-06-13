@@ -919,3 +919,24 @@ main {
 .studio-settings input[type="number"] { width: 72px; font: inherit; font-size: 13px; padding: 6px 8px; border: 1.5px solid #e2dfd8; border-radius: 6px; }
 .studio-settings select { font: inherit; font-size: 13px; padding: 6px 8px; border: 1.5px solid #e2dfd8; border-radius: 6px; max-width: 170px; }
 .studio-settings input:focus, .studio-settings select:focus { outline: none; border-color: #0f8a5f; }
+
+/* -- Higgsfield AI media panel (PR3) -- */
+.hf-panel { border: 1px solid #f0eeea; border-radius: 8px; padding: 8px 10px; background: #fbfaf7; }
+.hf-panel summary { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #5b21b6; cursor: pointer; }
+.hf-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.hf-prompt-form { display: flex; flex-direction: column; gap: 8px; }
+.hf-prompt-form textarea { width: 100%; font: inherit; font-size: 13px; border: 1.5px solid #e2dfd8; border-radius: 6px; padding: 7px 10px; resize: vertical; }
+.hf-prompt-form textarea:focus { outline: none; border-color: #5b21b6; }
+.hf-source { font: inherit; font-size: 12px; padding: 6px 8px; border: 1.5px solid #e2dfd8; border-radius: 6px; max-width: 220px; }
+.hf-job { font-size: 12px; padding: 6px 10px; border-radius: 6px; }
+.hf-job:empty { display: none; }
+.hf-running { background: #ede9fe; color: #5b21b6; }
+.hf-done { background: #e6f5f0; color: #0d5c40; }
+.hf-error { background: #fdecea; color: #c0392b; }
+.hf-spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #c4b5fd; border-top-color: #5b21b6; border-radius: 50%; animation: hfspin 0.8s linear infinite; vertical-align: -1px; }
+@keyframes hfspin { to { transform: rotate(360deg); } }
+.variant-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.variant-strip:empty { display: none; }
+.variant { display: flex; flex-direction: column; gap: 4px; width: 96px; }
+.variant img, .variant video { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; border: 2px solid transparent; background: #111; }
+.variant.live img, .variant.live video { border-color: #0f8a5f; }
