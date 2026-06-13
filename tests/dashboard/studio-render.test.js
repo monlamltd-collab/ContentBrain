@@ -66,3 +66,21 @@ test('card actions target the existing /api/social endpoints by id', () => {
   assert.match(html, /studioReject\('abc-123'/);
   assert.match(html, /studioRerender\('abc-123'/);
 });
+
+test('settings row: persisted values selected, template default as placeholder', () => {
+  const html = render.renderSettingsRow({
+    ...basePost,
+    meta: { duration_seconds: 15, visual_style: 'dark-tech', music_file: 'none' },
+  });
+  assert.match(html, /name="duration_seconds"[^>]*value="15"/);
+  assert.match(html, /value="dark-tech" selected/);
+  assert.match(html, /value="none" selected>Music: none/);
+  assert.match(html, /hx-post="\/dashboard\/studio\/posts\/abc-123\/settings"/);
+});
+
+test('settings row: empty meta → empty inputs with reel default placeholder', () => {
+  const html = render.renderSettingsRow(basePost); // reel → 6s default
+  assert.match(html, /placeholder="6s"/);
+  assert.match(html, /name="duration_seconds"[^>]*value=""/);
+  assert.match(html, /<option value="" selected>Music: random<\/option>/);
+});

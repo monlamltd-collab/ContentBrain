@@ -22,6 +22,8 @@ router.use(express.urlencoded({ extended: false }));
 const queries = require('../../lib/dashboard/studio-queries');
 const render = require('../../lib/dashboard/studio-render');
 const { errorFlash } = require('../../lib/dashboard/html');
+const { THEME_NAMES } = require('../../lib/themes');
+const { MIN_DURATION_SECONDS, MAX_DURATION_SECONDS } = require('../../lib/video-renderer');
 
 const TEMPLATE_PATH = path.join(__dirname, 'studio.html');
 let TEMPLATE_CACHE = null;
@@ -64,6 +66,45 @@ router.get('/grid', async (req, res) => {
   } catch (err) {
     console.error('[dashboard/studio] GET /grid:', err.message);
     sendHtml(res, `<div class="card-grid studio-grid" id="studio-grid">${errorFlash(`Failed to load drafts: ${err.message}`)}</div>`, 500);
+  }
+});
+
+// Creative settings — duration / theme / music → posts.meta. Empty values
+// clear the key (template default / AI-picked theme / random music).
+router.post('/posts/:id/settings', async (req, res) => {
+  const body = req.body || {};
+
+  const patch = {};
+  const rawDuration = typeof body.duration_seconds === 'string' ? body.duration_seconds.trim() : '';
+  if (rawDuration === '') {
+    patch.duration_seconds = null;
+  } else {
+    const n = parseInt(rawDuration, 10);
+    if (!Number.isFinite(n) || n < MIN_DURATION_SECONDS || n > MAX_DURATION_SECONDS) {
+      return sendHtml(res, errorFlash(`Length must be ${MIN_DURATION_SECONDS}–${MAX_DURATION_SECONDS} seconds.`), 400);
+    }
+    patch.duration_seconds = n;
+  }
+
+  const theme = typeof body.theme === 'string' ? body.theme.trim() : '';
+  if (theme === '') patch.visual_style = null;
+  else if (THEME_NAMES.includes(theme)) patch.visual_style = theme;
+  else return sendHtml(res, errorFlash(`Unknown theme '${theme}'.`), 400);
+
+  const music = typeof body.music === 'string' ? body.music.trim() : '';
+  if (music === '') patch.music_file = null;
+  else if (music === 'none' || queries.getMusicTracks().includes(music)) patch.music_file = music;
+  else return sendHtml(res, errorFlash(`Unknown music track '${music}'.`), 400);
+
+  try {
+    const updated = await queries.mergePostMeta(req.params.id, patch);
+    const html = render.renderSettingsRow(updated)
+      .replace('class="saved-flash"', 'class="saved-flash show"');
+    res.set('HX-Trigger', 'studio-saved');
+    sendHtml(res, html);
+  } catch (err) {
+    console.error('[dashboard/studio] POST /posts/:id/settings:', err.message);
+    sendHtml(res, errorFlash(`Save failed: ${err.message}`), 500);
   }
 });
 

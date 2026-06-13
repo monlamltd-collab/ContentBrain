@@ -34,6 +34,8 @@ async function run() {
 
       // Step 3: Store in Supabase
       const scheduledFor = getNextScheduleSlot(savedPosts.length);
+      const meta = {};
+      if (post.duration_seconds) meta.duration_seconds = post.duration_seconds;
       const saved = await insertPost({
         brand: post.brand,
         platform: post.platform,
@@ -44,7 +46,8 @@ async function run() {
         image_url: filename,
         video_url: videoFilename,
         status: 'draft',
-        scheduled_for: scheduledFor.toISOString()
+        scheduled_for: scheduledFor.toISOString(),
+        meta
       });
 
       savedPosts.push(saved);

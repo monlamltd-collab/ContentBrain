@@ -203,6 +203,33 @@ router.post('/mix', async (req, res) => {
   }
 });
 
+// ── Video durations (template_durations lever) ───────────────────────────
+
+router.post('/durations', async (req, res) => {
+  const body = req.body || {};
+  const reset = trim(body.reset) !== '';
+  try {
+    if (reset) {
+      await runtimeConfig.clearLever('global', 'template_durations');
+    } else {
+      const durations = {};
+      for (const t of Object.keys(runtimeConfig.DEFAULT_TEMPLATE_DURATIONS)) {
+        const n = parseInt(body[`duration_${t}`], 10);
+        if (!Number.isFinite(n) || n < 3 || n > 90) {
+          return send400(res, `Length for '${t}' must be 3–90 seconds.`);
+        }
+        durations[t] = n;
+      }
+      await runtimeConfig.setLever('global', 'template_durations', durations);
+    }
+    const fresh = await queries.getDesignSnapshot();
+    sendHtml(res, withSavedFlash(render.renderTimingSection(fresh)), 200, true);
+  } catch (err) {
+    console.error('[dashboard/design] POST /durations:', err.message);
+    send500(res, `Save failed: ${err.message}`);
+  }
+});
+
 // ── Lot schedule ──────────────────────────────────────────────────────────
 
 router.post('/lot-schedule', async (req, res) => {
