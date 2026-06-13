@@ -1,0 +1,118 @@
+<!-- routes/dashboard/studio.html — Studio tab skeleton (HTMX partial).
+     The grid fragment self-loads; card actions use the api() helper below
+     against the existing /api/social/* JSON endpoints. -->
+<section class="tab-section studio">
+  <div class="section-head">
+    <h2>Studio</h2>
+    <p class="section-sub">Edit copy, tune the creative, re-render, then approve or reject.</p>
+  </div>
+
+  <div id="studio-filter-slot"
+    hx-get="/dashboard/studio/filters"
+    hx-trigger="load"
+    hx-swap="innerHTML"></div>
+
+  <div id="studio-grid"
+    hx-get="/dashboard/studio/grid"
+    hx-trigger="load"
+    hx-swap="outerHTML">
+    <p class="loading">Loading drafts&hellip;</p>
+  </div>
+</section>
+
+<script>
+(function () {
+  // Idempotent: HTMX re-injects this partial on every tab switch.
+  if (window.__studioWired) return;
+  window.__studioWired = true;
+
+  window.studioApi = async function (method, path, body) {
+    const opts = { method, credentials: 'include', headers: { 'Content-Type': 'application/json' } };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || ('HTTP ' + res.status));
+    return json;
+  };
+
+  window.studioStatus = function (id, msg, isErr) {
+    const el = document.getElementById('status-' + id);
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'status-bar show ' + (isErr ? 'err' : 'ok');
+    clearTimeout(el._t);
+    el._t = setTimeout(function () { el.className = 'status-bar'; }, 3500);
+  };
+
+  window.studioSaveCopy = async function (id, btn) {
+    const card = document.getElementById('card-' + id);
+    const body = {};
+    card.querySelectorAll('textarea[data-key]').forEach(function (ta) { body[ta.dataset.key] = ta.value; });
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      await studioApi('PATCH', '/api/social/posts/' + id + '/copy', body);
+      studioStatus(id, '✓ Copy saved');
+    } catch (err) {
+      studioStatus(id, '✗ ' + err.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save copy';
+    }
+  };
+
+  window.studioRerender = async function (id, btn) {
+    btn.disabled = true; btn.textContent = 'Rendering…';
+    try {
+      await studioApi('POST', '/api/social/posts/' + id + '/rerender');
+      // Refresh just this card from the server so media + settings stay canonical.
+      htmx.ajax('GET', '/dashboard/studio/posts/' + id + '/card', { target: '#card-' + id, swap: 'outerHTML' });
+      studioStatus(id, '✓ Re-rendered');
+    } catch (err) {
+      studioStatus(id, '✗ ' + err.message, true);
+      btn.disabled = false; btn.textContent = 'Re-render';
+    }
+  };
+
+  window.studioApprove = async function (id) {
+    try {
+      await studioApi('POST', '/api/social/posts/' + id + '/approve');
+      dismissCard(id);
+    } catch (err) {
+      studioStatus(id, '✗ ' + err.message, true);
+    }
+  };
+
+  window.studioToggleReject = function (id) {
+    const box = document.getElementById('reject-' + id);
+    if (box) box.classList.toggle('open');
+  };
+
+  window.studioReject = async function (id) {
+    const box = document.getElementById('reject-' + id);
+    const feedback = box ? (box.querySelector('textarea') || {}).value : '';
+    try {
+      await studioApi('POST', '/api/social/posts/' + id + '/reject', { feedback: feedback });
+      dismissCard(id);
+    } catch (err) {
+      studioStatus(id, '✗ ' + err.message, true);
+    }
+  };
+
+  function dismissCard(id) {
+    const card = document.getElementById('card-' + id);
+    if (!card) return;
+    card.classList.add('dismissed');
+    setTimeout(function () { card.remove(); }, 320);
+  }
+
+  // Live charcounts for studio copy textareas (delegated; survives swaps).
+  document.addEventListener('input', function (e) {
+    const t = e.target;
+    if (!t || t.tagName !== 'TEXTAREA' || !t.dataset.key || !t.dataset.max) return;
+    const counter = t.parentElement && t.parentElement.querySelector('.charcount');
+    if (!counter) return;
+    const len = t.value.length, max = Number(t.dataset.max);
+    counter.textContent = len + ' / ' + max;
+    counter.className = 'charcount' + (len > max ? ' over' : len > max * 0.85 ? ' warn' : '');
+  });
+})();
+</script>
