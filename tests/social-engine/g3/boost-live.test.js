@@ -21,17 +21,30 @@ const crypto = require('crypto');
 
 const BOOST_PATH = require.resolve('../../../lib/social-engine/boost');
 const HELPERS_PATH = require.resolve('../../../lib/social-engine/helpers');
+const RUNTIME_CFG_PATH = require.resolve('../../../lib/runtime-config');
+const TELEGRAM_PATH = require.resolve('../../../lib/telegram');
 
 let insertCalls = [];
 let activeRows = [];
 let markFailedCalls = [];
 let fetchCalls = [];
 let nextFetchResponses = [];
+let boostCfg = { enabled: true, dailyBudgetPence: 200, spendCapPence: 5000 };
+let committedSpend = 0;
 const originalFetch = global.fetch;
 
 function loadFresh() {
   delete require.cache[BOOST_PATH];
   delete require.cache[HELPERS_PATH];
+  delete require.cache[RUNTIME_CFG_PATH];
+  delete require.cache[TELEGRAM_PATH];
+  // Stub Telegram so the cap-reached alert is a no-op (otherwise it fires a
+  // real api.telegram.org fetch via the dotenv-loaded bot token, polluting
+  // the fetch-call count this suite uses to assert "no ad spend").
+  require.cache[TELEGRAM_PATH] = {
+    id: TELEGRAM_PATH, filename: TELEGRAM_PATH, loaded: true,
+    exports: { sendNotification: async () => {} },
+  };
   require.cache[HELPERS_PATH] = {
     id: HELPERS_PATH,
     filename: HELPERS_PATH,
@@ -46,7 +59,16 @@ function loadFresh() {
         markFailedCalls.push({ id, msg });
         return { id, status: 'failed' };
       },
+      getCommittedBoostSpendPence: async () => committedSpend,
     },
+  };
+  // Stub runtime-config so the spend gates are controllable per-test and the
+  // real module (Supabase client) never loads.
+  require.cache[RUNTIME_CFG_PATH] = {
+    id: RUNTIME_CFG_PATH,
+    filename: RUNTIME_CFG_PATH,
+    loaded: true,
+    exports: { getBoostConfig: async () => boostCfg },
   };
   return require('../../../lib/social-engine/boost');
 }
@@ -57,6 +79,8 @@ beforeEach(() => {
   markFailedCalls = [];
   fetchCalls = [];
   nextFetchResponses = [];
+  boostCfg = { enabled: true, dailyBudgetPence: 200, spendCapPence: 5000 };
+  committedSpend = 0;
   delete process.env.MAKE_BOOST_WEBHOOK_URL;
   delete process.env.MAKE_WEBHOOK_SECRET;
   delete process.env.BASE_URL;
@@ -138,6 +162,10 @@ test('live fire: POSTs signed payload with all required fields', async () => {
   assert.equal(sent.fb_post_id, 'fb-post-id-xyz');
   assert.equal(sent.page_id, 'page-aaa');
   assert.equal(sent.objective, 'OUTCOME_ENGAGEMENT');
+  // Follower optimisation — the fields that turn a generic engagement ad into
+  // a page-follows ad.
+  assert.equal(sent.optimization_goal, 'PAGE_LIKES');
+  assert.deepEqual(sent.promoted_object, { page_id: 'page-aaa' });
   assert.equal(sent.daily_budget_pence, 200);
   assert.equal(sent.duration_hours, 24);
   assert.equal(sent.callback_url, 'https://contentbrain.up.railway.app/api/social-boost-callback');
@@ -191,6 +219,50 @@ test('live fire: network throw calls markBoostFailed + returns fired_webhook=fal
   assert.equal(markFailedCalls.length, 1);
   assert.match(markFailedCalls[0].msg, /Make webhook fetch failed/);
   assert.match(markFailedCalls[0].msg, /ECONNREFUSED/);
+});
+
+// ── Spend gates (real-money safety) ───────────────────────────
+
+test('disabled: boost.enabled=false → no insert, no fetch, skipped=disabled', async () => {
+  process.env.MAKE_BOOST_WEBHOOK_URL = 'https://hook.eu1.make.com/x';
+  process.env.MAKE_WEBHOOK_SECRET = 's';
+  boostCfg = { enabled: false, dailyBudgetPence: 200, spendCapPence: 5000 };
+
+  const { requestBoost } = loadFresh();
+  const r = await requestBoost({ id: 'p-off', meta: { niche_tag: 'wales' } }, 'fb-off');
+  assert.equal(r.skipped, 'disabled');
+  assert.equal(r.fired_webhook, false);
+  assert.equal(r.boost_run_id, null);
+  assert.equal(insertCalls.length, 0, 'no row inserted when disabled');
+  assert.equal(fetchCalls.length, 0, 'no spend when disabled');
+});
+
+test('spend cap: committed + budget over cap → no insert, no fetch, skipped=cap', async () => {
+  process.env.MAKE_BOOST_WEBHOOK_URL = 'https://hook.eu1.make.com/x';
+  process.env.MAKE_WEBHOOK_SECRET = 's';
+  boostCfg = { enabled: true, dailyBudgetPence: 200, spendCapPence: 5000 };
+  committedSpend = 4900; // 4900 + 200 = 5100 > 5000
+
+  const { requestBoost } = loadFresh();
+  const r = await requestBoost({ id: 'p-cap', meta: { niche_tag: 'wales' } }, 'fb-cap');
+  assert.equal(r.skipped, 'cap');
+  assert.equal(r.fired_webhook, false);
+  assert.equal(r.boost_run_id, null);
+  assert.equal(insertCalls.length, 0, 'no row inserted past cap');
+  assert.equal(fetchCalls.length, 0, 'no spend past cap');
+});
+
+test('spend cap: exactly at the limit still fires (boundary)', async () => {
+  process.env.MAKE_BOOST_WEBHOOK_URL = 'https://hook.eu1.make.com/x';
+  process.env.MAKE_WEBHOOK_SECRET = 's';
+  boostCfg = { enabled: true, dailyBudgetPence: 200, spendCapPence: 5000 };
+  committedSpend = 4800; // 4800 + 200 = 5000, not over
+  nextFetchResponses.push({ ok: true, body: {} });
+
+  const { requestBoost } = loadFresh();
+  const r = await requestBoost({ id: 'p-edge', meta: {} }, 'fb-edge');
+  assert.equal(r.fired_webhook, true);
+  assert.equal(insertCalls.length, 1);
 });
 
 // ── signOutbound throw ────────────────────────────────────────

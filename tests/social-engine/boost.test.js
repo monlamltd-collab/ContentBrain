@@ -14,6 +14,7 @@ const BOOST_PATH = require.resolve('../../lib/social-engine/boost');
 const HELPERS_PATH = require.resolve('../../lib/social-engine/helpers');
 const WEBHOOK_AUTH_PATH = require.resolve('../../lib/social-engine/webhook-auth');
 const CONSTANTS_PATH = require.resolve('../../lib/social-engine/constants');
+const RUNTIME_CFG_PATH = require.resolve('../../lib/runtime-config');
 
 let mockState;
 let capturedInserts;
@@ -23,6 +24,7 @@ function loadBoostFresh(overrides = {}) {
   delete require.cache[BOOST_PATH];
   delete require.cache[HELPERS_PATH];
   delete require.cache[WEBHOOK_AUTH_PATH];
+  delete require.cache[RUNTIME_CFG_PATH];
 
   capturedInserts = [];
   capturedWebhookPayloads = [];
@@ -31,8 +33,18 @@ function loadBoostFresh(overrides = {}) {
     insertBoostRun: overrides.insertBoostRun || (async (row) => { capturedInserts.push(row); return { id: 'boost-uuid-1', ...row }; }),
     getActiveBoostRunsForPost: overrides.getActiveBoostRunsForPost || (async () => mockState.activeBoostRuns),
     markBoostFailed: overrides.markBoostFailed || (async () => {}),
+    getCommittedBoostSpendPence: overrides.getCommittedBoostSpendPence || (async () => 0),
   };
   require.cache[HELPERS_PATH] = { id: HELPERS_PATH, filename: HELPERS_PATH, loaded: true, exports: helpersStub };
+
+  // boost.js now requires ../runtime-config at load (real-money gates).
+  // Stub it so the spend path is enabled + under cap by default and the
+  // real module (which builds a Supabase client) never loads in tests.
+  const runtimeCfgStub = {
+    getBoostConfig: overrides.getBoostConfig
+      || (async () => ({ enabled: true, dailyBudgetPence: 200, spendCapPence: 5000 })),
+  };
+  require.cache[RUNTIME_CFG_PATH] = { id: RUNTIME_CFG_PATH, filename: RUNTIME_CFG_PATH, loaded: true, exports: runtimeCfgStub };
 
   const webhookAuthStub = {
     signOutbound: overrides.signOutbound || ((payload) => ({ ...payload, _sig: 'fake-sig' })),
