@@ -9,6 +9,7 @@ const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const SCRAPER_PATH = require.resolve('../lib/reddit-scraper');
+const REDDIT_API_PATH = require.resolve('../lib/reddit-api');
 const CRAWLEE_PATH = require.resolve('../lib/reddit-crawlee');
 const SUPABASE_PATH = require.resolve('../lib/supabase');
 const RUNTIME_CFG_PATH = require.resolve('../lib/runtime-config');
@@ -36,6 +37,14 @@ function makeCrawleeMock() {
   };
 }
 
+function makeRedditApiMock(over = {}) {
+  return {
+    isRedditApiConfigured: over.isRedditApiConfigured || (() => false),
+    fetchSubredditListingApi: over.fetchSubredditListingApi || (async () => { throw new Error('reddit-api not mocked'); }),
+    fetchThreadApi: over.fetchThreadApi || (async () => { throw new Error('reddit-api not mocked'); }),
+  };
+}
+
 function makeSupabaseMock() {
   const bm = mockState.bmClientPresent ? {
     from: () => ({
@@ -51,10 +60,11 @@ function makeSupabaseMock() {
   return { supabase: {}, supabaseBridgematch: bm };
 }
 
-function loadScraperFresh({ realBriefs = false } = {}) {
-  for (const p of [SCRAPER_PATH, CRAWLEE_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
+function loadScraperFresh({ realBriefs = false, redditApi = {} } = {}) {
+  for (const p of [SCRAPER_PATH, REDDIT_API_PATH, CRAWLEE_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
     delete require.cache[p];
   }
+  require.cache[REDDIT_API_PATH] = { id: REDDIT_API_PATH, filename: REDDIT_API_PATH, loaded: true, exports: makeRedditApiMock(redditApi) };
   require.cache[CRAWLEE_PATH] = { id: CRAWLEE_PATH, filename: CRAWLEE_PATH, loaded: true, exports: makeCrawleeMock() };
   require.cache[SUPABASE_PATH] = { id: SUPABASE_PATH, filename: SUPABASE_PATH, loaded: true, exports: makeSupabaseMock() };
   require.cache[RUNTIME_CFG_PATH] = {
@@ -223,4 +233,38 @@ test('runRedditScrape: no promotion call when nothing inserted', async () => {
   const res = await runRedditScrape();
   assert.equal(res.reason, 'no_threads');
   assert.equal(mockState.promoteCalled, 0);
+});
+
+// ── Reddit OAuth API path ────────────────────────────────────────────────
+
+test('runRedditScrape: uses the Reddit API when configured (no Crawlee calls)', async () => {
+  seedHappyPath();
+  const apiCalls = [];
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async (sub) => { apiCalls.push(`listing:${sub}`); return mockState.listings[sub] || []; },
+    fetchThreadApi: async (url) => {
+      apiCalls.push(`thread:${url}`);
+      const key = Object.keys(mockState.threads).find(k => url.includes(k));
+      return key ? mockState.threads[key] : null;
+    },
+  } });
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2);
+  assert.ok(apiCalls.includes('listing:bridging'));
+  assert.equal(mockState.crawleeCalls.length, 0, 'Crawlee must not run when the API works');
+});
+
+test('runRedditScrape: API failure falls back to Crawlee', async () => {
+  seedHappyPath();
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async () => { throw new Error('api 503'); },
+    fetchThreadApi: async () => { throw new Error('api 503'); },
+  } });
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2); // recovered via the Crawlee fallback
+  assert.ok(mockState.crawleeCalls.includes('listing:bridging'));
 });
