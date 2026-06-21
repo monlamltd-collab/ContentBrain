@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const cheerio = require('cheerio');
 
 let RICH_CSV_PATH;
 let BARE_CSV_PATH;
@@ -95,21 +96,20 @@ function makeQuery(table) {
   return api;
 }
 
-// Captured Firecrawl scrape calls (reset per loadImporterFresh).
-let firecrawlCalls = [];
+// Captured web-enrich fetch calls (reset per loadImporterFresh).
+let webFetchCalls = [];
 
-// Inject mocks via require.cache BEFORE the importer is loaded.
+// Inject mocks via require.cache BEFORE the importer is loaded. Web enrichment
+// now goes through lib/fetch-html (Crawlee-first, Firecrawl bypass) + our own
+// LLM extractor (lib/llm), so those are the boundaries we stub here.
 function loadImporterFresh(mocks = {}) {
   const supPath = require.resolve('../../lib/supabase');
   const lendersPath = require.resolve('../../lib/sales-brain/import-lenders');
   const fcaPath = require.resolve('../../lib/sales-brain/fca-fetch');
-  const firecrawlPath = require.resolve('../../lib/firecrawl');
+  const fetchHtmlPath = require.resolve('../../lib/fetch-html');
+  const llmPath = require.resolve('../../lib/llm');
   const importerPath = require.resolve('../../lib/sales-brain/import-brokers');
-  delete require.cache[supPath];
-  delete require.cache[lendersPath];
-  delete require.cache[fcaPath];
-  delete require.cache[firecrawlPath];
-  delete require.cache[importerPath];
+  for (const p of [supPath, lendersPath, fcaPath, fetchHtmlPath, llmPath, importerPath]) delete require.cache[p];
 
   require.cache[supPath] = {
     id: supPath, filename: supPath, loaded: true,
@@ -125,15 +125,24 @@ function loadImporterFresh(mocks = {}) {
     },
   };
 
-  firecrawlCalls = [];
-  require.cache[firecrawlPath] = {
-    id: firecrawlPath, filename: firecrawlPath, loaded: true,
+  webFetchCalls = [];
+  require.cache[fetchHtmlPath] = {
+    id: fetchHtmlPath, filename: fetchHtmlPath, loaded: true,
     exports: {
-      isFirecrawlConfigured: mocks.isFirecrawlConfigured || (() => true),
-      firecrawlScrape: mocks.firecrawlScrape || (async (url) => {
-        firecrawlCalls.push(url);
-        return { json: {} };
+      fetchHtml: mocks.fetchHtml || (async (url) => {
+        webFetchCalls.push(url);
+        return { $: cheerio.load('<html><body></body></html>'), html: '', via: 'crawlee' };
       }),
+      resetBypassBudget: () => {},
+      getBypassCount: () => 0,
+    },
+  };
+
+  require.cache[llmPath] = {
+    id: llmPath, filename: llmPath, loaded: true,
+    exports: {
+      createLLM: () => ({ messages: { create: async () => ({ content: [{ type: 'text', text: '{}' }] }) } }),
+      llmJson: mocks.llmJson || (async () => ({})),
     },
   };
 
@@ -301,24 +310,20 @@ test('importer: errors clearly when no CSV and no FCA env', async () => {
   }
 });
 
-// ── Firecrawl enrichment (Phase E) ───────────────────────────────────────
+// ── Web enrichment (Phase E) — Crawlee fetch + our LLM extractor ──────────
 
-test('firecrawl: named-person + generic contacts inserted with right confidence/source', async () => {
+test('web-enrich: named-person + generic contacts inserted with right confidence/source', async () => {
   const { importBrokers } = loadImporterFresh({
-    firecrawlScrape: async (url) => {
-      firecrawlCalls.push(url);
-      return {
-        json: {
-          people: [{ name: 'Jane Broker', role: 'Director', email: 'Jane@AcmeBridging.co.uk' }],
-          emails: ['hello@acmebridging.co.uk'],
-        },
-      };
-    },
+    fetchHtml: async (url) => { webFetchCalls.push(url); return { $: cheerio.load('<html><body>Contact us</body></html>') }; },
+    llmJson: async () => ({
+      people: [{ name: 'Jane Broker', role: 'Director', email: 'Jane@AcmeBridging.co.uk' }],
+      emails: ['hello@acmebridging.co.uk'],
+    }),
   });
 
-  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 1 });
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useWebEnrich: true, webEnrichTopN: 1 });
 
-  const contacts = [...store.contacts.values()].filter(c => c.source === 'firecrawl');
+  const contacts = [...store.contacts.values()].filter(c => c.source === 'crawlee');
   assert.equal(contacts.length, 2);
   const jane = contacts.find(c => c.email === 'jane@acmebridging.co.uk');
   assert.ok(jane, 'named-person contact inserted, email lowercased');
@@ -329,9 +334,19 @@ test('firecrawl: named-person + generic contacts inserted with right confidence/
   assert.equal(generic.role, 'Generic inbox');
 });
 
-test('firecrawl: empty extraction → info@ synthetic fallback still inserted', async () => {
-  const { importBrokers } = loadImporterFresh(); // default mock returns { json: {} }
-  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 5 });
+test('web-enrich: mailto: links scraped off the page even when the LLM misses them', async () => {
+  const { importBrokers } = loadImporterFresh({
+    fetchHtml: async () => ({ $: cheerio.load('<html><body><a href="mailto:deals@acme-stf.co.uk?subject=hi">Email us</a></body></html>') }),
+    llmJson: async () => ({}), // LLM finds nothing
+  });
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useWebEnrich: true, webEnrichTopN: 1 });
+  const crawlee = [...store.contacts.values()].filter(c => c.source === 'crawlee');
+  assert.ok(crawlee.some(c => c.email === 'deals@acme-stf.co.uk'), 'mailto email captured, query string stripped');
+});
+
+test('web-enrich: empty extraction → info@ synthetic fallback still inserted', async () => {
+  const { importBrokers } = loadImporterFresh(); // default fetchHtml empty page, llmJson {}
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useWebEnrich: true, webEnrichTopN: 5 });
 
   // Synthetic info@ contacts unchanged (source 'manual', confidence 50)
   const synth = [...store.contacts.values()].filter(c => c.source === 'manual');
@@ -339,36 +354,37 @@ test('firecrawl: empty extraction → info@ synthetic fallback still inserted', 
   assert.ok(synth.every(c => c.confidence_score === 50));
 });
 
-test('firecrawl: firecrawlTopN caps the number of scrapes', async () => {
+test('web-enrich: webEnrichTopN caps the number of fetches', async () => {
   const { importBrokers } = loadImporterFresh();
-  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 2 });
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useWebEnrich: true, webEnrichTopN: 2 });
   // 4 firms match the keyword filter but only 3 have websites; cap=2 means
-  // at most 2 scrape calls regardless.
-  assert.ok(firecrawlCalls.length <= 2, `expected <=2 scrapes, got ${firecrawlCalls.length}`);
+  // at most 2 fetch calls regardless.
+  assert.ok(webFetchCalls.length <= 2, `expected <=2 fetches, got ${webFetchCalls.length}`);
 });
 
-test('firecrawl: key missing → warning, zero scrapes, import still completes', async () => {
-  const { importBrokers } = loadImporterFresh({
-    isFirecrawlConfigured: () => false,
-  });
-  const result = await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true });
-  assert.equal(firecrawlCalls.length, 0);
-  assert.ok(result.warnings.some(w => /FIRECRAWL_API_KEY missing/.test(w)));
-  assert.ok(store.prospects.size > 0, 'prospects still imported');
-});
-
-test('firecrawl: scrape failure for one firm warns and continues', async () => {
+test('web-enrich: fetch failure for one firm warns and continues', async () => {
   let call = 0;
   const { importBrokers } = loadImporterFresh({
-    firecrawlScrape: async (url) => {
-      firecrawlCalls.push(url);
+    fetchHtml: async (url) => {
+      webFetchCalls.push(url);
       call++;
-      if (call === 1) throw new Error('site timed out');
-      return { json: { emails: ['team@acme-stf.co.uk'] } };
+      if (call === 1) throw new Error('crawlee blocked and Firecrawl bypass budget exhausted');
+      return { $: cheerio.load('<html><body></body></html>') };
     },
+    llmJson: async () => ({ emails: ['team@acme-stf.co.uk'] }),
   });
-  const result = await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 3 });
-  assert.ok(result.warnings.some(w => /Firecrawl enrichment failed/.test(w)));
-  const fc = [...store.contacts.values()].filter(c => c.source === 'firecrawl');
-  assert.ok(fc.length >= 1, 'later firms still enriched after one failure');
+  const result = await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useWebEnrich: true, webEnrichTopN: 3 });
+  assert.ok(result.warnings.some(w => /web enrichment failed/.test(w)));
+  const crawlee = [...store.contacts.values()].filter(c => c.source === 'crawlee');
+  assert.ok(crawlee.length >= 1, 'later firms still enriched after one failure');
+});
+
+test('web-enrich: deprecated --firecrawl/useFirecrawl alias still triggers web enrichment', async () => {
+  const { importBrokers } = loadImporterFresh({
+    fetchHtml: async (url) => { webFetchCalls.push(url); return { $: cheerio.load('<html><body></body></html>') }; },
+    llmJson: async () => ({ emails: ['legacy@acme-stf.co.uk'] }),
+  });
+  await importBrokers({ sourceCsvPath: RICH_CSV_PATH, useFirecrawl: true, firecrawlTopN: 1 });
+  const crawlee = [...store.contacts.values()].filter(c => c.source === 'crawlee');
+  assert.ok(crawlee.some(c => c.email === 'legacy@acme-stf.co.uk'), 'useFirecrawl alias maps to useWebEnrich');
 });
