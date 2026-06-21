@@ -1,12 +1,15 @@
-// lib/reddit-scraper.js — contract tests against the REAL reddit-briefs
+// tests/reddit-scraper.test.js — contract tests against the REAL reddit-briefs
 // scoring (the promotion pipeline must keep working unchanged), plus
-// orchestrator paths with mocked firecrawl + supabase + runtime-config.
+// orchestrator paths with the Crawlee-first fetchers (lib/reddit-crawlee)
+// mocked. reddit-scraper no longer touches Firecrawl directly — the
+// Crawlee-first/Firecrawl-bypass policy lives in lib/fetch-html (tested
+// separately), so here we mock the reddit-crawlee fetchers.
 
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const SCRAPER_PATH = require.resolve('../lib/reddit-scraper');
-const FIRECRAWL_PATH = require.resolve('../lib/firecrawl');
+const REDDIT_API_PATH = require.resolve('../lib/reddit-api');
 const CRAWLEE_PATH = require.resolve('../lib/reddit-crawlee');
 const SUPABASE_PATH = require.resolve('../lib/supabase');
 const RUNTIME_CFG_PATH = require.resolve('../lib/runtime-config');
@@ -16,35 +19,29 @@ let mockState;
 
 function makeCrawleeMock() {
   return {
+    // Crawlee-first fetchers (lib/reddit-crawlee) — the scraper calls these;
+    // their internal Firecrawl-bypass is covered by tests/fetch-html.test.js.
     fetchSubredditListingCrawlee: async (sub) => {
       mockState.crawleeCalls.push(`listing:${sub}`);
-      if (mockState.crawleeFailSubs.includes(sub)) throw new Error(`crawlee mock failure for r/${sub}`);
-      return mockState.crawleeListings[sub] || [];
+      if (mockState.failSubs.includes(sub)) throw new Error(`blocked r/${sub}`);
+      return mockState.listings[sub] || [];
     },
     fetchThreadCrawlee: async (url) => {
       mockState.crawleeCalls.push(`thread:${url}`);
-      const key = Object.keys(mockState.crawleeThreads).find(k => url.includes(k));
-      return key ? mockState.crawleeThreads[key] : null;
+      const key = Object.keys(mockState.threads).find(k => url.includes(k));
+      return key ? mockState.threads[key] : null;
     },
+    // parsers are unused by the scraper but exported by the real module
+    parseListing: () => [],
+    parseThread: () => null,
   };
 }
 
-function makeFirecrawlMock() {
+function makeRedditApiMock(over = {}) {
   return {
-    isFirecrawlConfigured: () => mockState.firecrawlConfigured,
-    firecrawlScrape: async (url) => {
-      mockState.scrapeCalls.push(url);
-      if (mockState.failUrls.some(f => url.includes(f))) {
-        throw new Error(`mock failure for ${url}`);
-      }
-      if (url.includes('/top/?t=')) {
-        const sub = url.match(/\/r\/([^/]+)\//)[1];
-        return { json: { threads: mockState.listings[sub] || [] } };
-      }
-      // thread fetch
-      const key = Object.keys(mockState.threads).find(k => url.includes(k));
-      return { json: key ? mockState.threads[key] : null };
-    },
+    isRedditApiConfigured: over.isRedditApiConfigured || (() => false),
+    fetchSubredditListingApi: over.fetchSubredditListingApi || (async () => { throw new Error('reddit-api not mocked'); }),
+    fetchThreadApi: over.fetchThreadApi || (async () => { throw new Error('reddit-api not mocked'); }),
   };
 }
 
@@ -63,11 +60,11 @@ function makeSupabaseMock() {
   return { supabase: {}, supabaseBridgematch: bm };
 }
 
-function loadScraperFresh({ realBriefs = false } = {}) {
-  for (const p of [SCRAPER_PATH, FIRECRAWL_PATH, CRAWLEE_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
+function loadScraperFresh({ realBriefs = false, redditApi = {} } = {}) {
+  for (const p of [SCRAPER_PATH, REDDIT_API_PATH, CRAWLEE_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
     delete require.cache[p];
   }
-  require.cache[FIRECRAWL_PATH] = { id: FIRECRAWL_PATH, filename: FIRECRAWL_PATH, loaded: true, exports: makeFirecrawlMock() };
+  require.cache[REDDIT_API_PATH] = { id: REDDIT_API_PATH, filename: REDDIT_API_PATH, loaded: true, exports: makeRedditApiMock(redditApi) };
   require.cache[CRAWLEE_PATH] = { id: CRAWLEE_PATH, filename: CRAWLEE_PATH, loaded: true, exports: makeCrawleeMock() };
   require.cache[SUPABASE_PATH] = { id: SUPABASE_PATH, filename: SUPABASE_PATH, loaded: true, exports: makeSupabaseMock() };
   require.cache[RUNTIME_CFG_PATH] = {
@@ -88,21 +85,15 @@ function loadScraperFresh({ realBriefs = false } = {}) {
 
 beforeEach(() => {
   mockState = {
-    firecrawlConfigured: true,
     bmClientPresent: true,
     subredditLever: null, // null → DEFAULT_SUBREDDITS
     listings: {},
     threads: {},
     existingRows: [],
     inserts: [],
-    scrapeCalls: [],
-    failUrls: [],
     promoteCalled: 0,
-    // Crawlee fallback fixtures
     crawleeCalls: [],
-    crawleeListings: {},
-    crawleeThreads: {},
-    crawleeFailSubs: [],
+    failSubs: [],
   };
 });
 
@@ -116,9 +107,9 @@ test('buildArticleRow: scoreThread round-trips comment count and clean title', (
   const { scoreThread } = require('../lib/reddit-briefs');
 
   delete require.cache[SCRAPER_PATH];
-  delete require.cache[FIRECRAWL_PATH];
+  delete require.cache[CRAWLEE_PATH];
   delete require.cache[RUNTIME_CFG_PATH];
-  require.cache[FIRECRAWL_PATH] = { id: FIRECRAWL_PATH, filename: FIRECRAWL_PATH, loaded: true, exports: makeFirecrawlMock() };
+  require.cache[CRAWLEE_PATH] = { id: CRAWLEE_PATH, filename: CRAWLEE_PATH, loaded: true, exports: makeCrawleeMock() };
   require.cache[RUNTIME_CFG_PATH] = { id: RUNTIME_CFG_PATH, filename: RUNTIME_CFG_PATH, loaded: true, exports: { getRedditSubreddits: async () => null } };
   const { buildArticleRow } = require('../lib/reddit-scraper');
 
@@ -215,58 +206,24 @@ test('runRedditScrape: skips URLs already in scraped_articles', async () => {
   assert.match(mockState.inserts[0].title, /HousingUK/);
 });
 
-test('runRedditScrape: BM client missing → no_bm_client, zero firecrawl calls', async () => {
+test('runRedditScrape: BM client missing → no_bm_client, zero crawlee calls', async () => {
   mockState.bmClientPresent = false;
   const { runRedditScrape } = loadScraperFresh();
   const res = await runRedditScrape();
   assert.equal(res.reason, 'no_bm_client');
-  assert.equal(mockState.scrapeCalls.length, 0);
+  assert.equal(mockState.crawleeCalls.length, 0);
 });
 
-test('runRedditScrape: Firecrawl key unset → proceeds via Crawlee fallback', async () => {
-  mockState.firecrawlConfigured = false;
-  mockState.subredditLever = ['bridging'];
-  mockState.crawleeListings = {
-    bridging: [{ title: 'Crawlee thread?', url: 'https://www.reddit.com/r/bridging/comments/ccc/slug/', comment_count: 4 }],
-  };
-  mockState.crawleeThreads = {
-    '/comments/ccc': { title: 'Crawlee thread?', selftext: 'body', top_comments: ['c1'] },
-  };
-  const { runRedditScrape } = loadScraperFresh();
-  const res = await runRedditScrape();
-
-  assert.equal(res.inserted, 1);
-  assert.equal(mockState.scrapeCalls.length, 0, 'Firecrawl must not be called when unconfigured');
-  assert.ok(mockState.crawleeCalls.includes('listing:bridging'));
-  assert.match(mockState.inserts[0].title, /^\[Reddit r\/bridging\] /);
-});
-
-test('runRedditScrape: Firecrawl error → Crawlee fallback used for that call', async () => {
+test('runRedditScrape: a blocked sub (both Crawlee+Firecrawl) does not sink the others', async () => {
   seedHappyPath();
-  mockState.failUrls = ['/r/bridging/top']; // Firecrawl listing fails for bridging only
-  mockState.crawleeListings = {
-    bridging: [{ title: 'Thread A?', url: 'https://old.reddit.com/r/bridging/comments/aaa/slug/', comment_count: 5 }],
-  };
-  const { runRedditScrape } = loadScraperFresh();
-  const res = await runRedditScrape();
-
-  // Both threads land: bridging via Crawlee, HousingUK via Firecrawl
-  assert.equal(res.inserted, 2);
-  assert.equal(res.errors.length, 0, 'fallback success means no recorded error');
-  assert.ok(mockState.crawleeCalls.includes('listing:bridging'));
-  assert.ok(!mockState.crawleeCalls.includes('listing:HousingUK'), 'healthy Firecrawl sub must not hit Crawlee');
-});
-
-test('runRedditScrape: one sub failing on BOTH paths does not sink the others', async () => {
-  seedHappyPath();
-  mockState.failUrls = ['/r/bridging/top'];   // Firecrawl fails for bridging
-  mockState.crawleeFailSubs = ['bridging'];   // ...and so does Crawlee
+  mockState.failSubs = ['bridging']; // listing fetch throws after fetch-html exhausts its options
   const { runRedditScrape } = loadScraperFresh();
   const res = await runRedditScrape();
 
   assert.equal(res.inserted, 1); // HousingUK still processed
   assert.equal(res.errors.length, 1);
   assert.match(res.errors[0], /listing r\/bridging/);
+  assert.match(mockState.inserts[0].title, /HousingUK/);
 });
 
 test('runRedditScrape: no promotion call when nothing inserted', async () => {
@@ -276,4 +233,38 @@ test('runRedditScrape: no promotion call when nothing inserted', async () => {
   const res = await runRedditScrape();
   assert.equal(res.reason, 'no_threads');
   assert.equal(mockState.promoteCalled, 0);
+});
+
+// ── Reddit OAuth API path ────────────────────────────────────────────────
+
+test('runRedditScrape: uses the Reddit API when configured (no Crawlee calls)', async () => {
+  seedHappyPath();
+  const apiCalls = [];
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async (sub) => { apiCalls.push(`listing:${sub}`); return mockState.listings[sub] || []; },
+    fetchThreadApi: async (url) => {
+      apiCalls.push(`thread:${url}`);
+      const key = Object.keys(mockState.threads).find(k => url.includes(k));
+      return key ? mockState.threads[key] : null;
+    },
+  } });
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2);
+  assert.ok(apiCalls.includes('listing:bridging'));
+  assert.equal(mockState.crawleeCalls.length, 0, 'Crawlee must not run when the API works');
+});
+
+test('runRedditScrape: API failure falls back to Crawlee', async () => {
+  seedHappyPath();
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async () => { throw new Error('api 503'); },
+    fetchThreadApi: async () => { throw new Error('api 503'); },
+  } });
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2); // recovered via the Crawlee fallback
+  assert.ok(mockState.crawleeCalls.includes('listing:bridging'));
 });

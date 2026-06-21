@@ -60,6 +60,21 @@ test('firecrawlScrape: json-extraction format passes through', async () => {
   assert.deepEqual(body.formats[0].schema, schema);
 });
 
+test('firecrawlScrape: proxy option passes through to the request body', async () => {
+  const { firecrawlScrape } = loadFresh();
+  await firecrawlScrape('https://example.com', { formats: ['rawHtml'], proxy: 'enhanced' });
+  const body = JSON.parse(fetchCalls[0].opts.body);
+  assert.equal(body.proxy, 'enhanced');
+  assert.deepEqual(body.formats, ['rawHtml']);
+});
+
+test('firecrawlScrape: no proxy key sent when unset (backward compatible)', async () => {
+  const { firecrawlScrape } = loadFresh();
+  await firecrawlScrape('https://example.com', { formats: ['markdown'] });
+  const body = JSON.parse(fetchCalls[0].opts.body);
+  assert.equal('proxy' in body, false);
+});
+
 test('firecrawlScrape: throws when key unset', async () => {
   delete process.env.FIRECRAWL_API_KEY;
   const { firecrawlScrape } = loadFresh();
