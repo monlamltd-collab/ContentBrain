@@ -228,9 +228,9 @@ function makeFakeResendFrom() {
       const override = fromOverrides[track];
       if (override) return override;
       const defaults = {
-        lender: 'Simon at BridgeMatch <outreach@outreach.bridgematch.co.uk>',
-        broker: 'Simon Deeming <simon@auctionbrain.co.uk>',
-        auction_house: 'Simon Deeming <simon@auctionbrain.co.uk>',
+        lender: 'BridgeMatch Team <outreach@outreach.bridgematch.co.uk>',
+        broker: 'AuctionBrain Team <hello@auctionbrain.co.uk>',
+        auction_house: 'AuctionBrain Team <hello@auctionbrain.co.uk>',
       };
       if (defaults[track]) return defaults[track];
       throw new Error(`getResendFrom: invalid track '${track}'`);
