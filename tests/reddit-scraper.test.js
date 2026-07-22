@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const SCRAPER_PATH = require.resolve('../lib/reddit-scraper');
 const REDDIT_API_PATH = require.resolve('../lib/reddit-api');
 const CRAWLEE_PATH = require.resolve('../lib/reddit-crawlee');
+const RSS_PATH = require.resolve('../lib/reddit-rss');
 const SUPABASE_PATH = require.resolve('../lib/supabase');
 const RUNTIME_CFG_PATH = require.resolve('../lib/runtime-config');
 const BRIEFS_PATH = require.resolve('../lib/reddit-briefs');
@@ -45,6 +46,27 @@ function makeRedditApiMock(over = {}) {
   };
 }
 
+function makeRssMock() {
+  return {
+    fetchSubredditRss: async (sub) => {
+      mockState.rssCalls.push(`listing:${sub}`);
+      if (mockState.rssForbiddenSubs.includes(sub)) {
+        const err = new Error('Reddit RSS 403');
+        err.status = 403;
+        throw err;
+      }
+      if (!mockState.rssEnabled) throw new Error('RSS disabled in this test');
+      return mockState.listings[sub] || [];
+    },
+    fetchThreadRss: async (url) => {
+      mockState.rssCalls.push(`thread:${url}`);
+      if (!mockState.rssEnabled) throw new Error('RSS disabled in this test');
+      const key = Object.keys(mockState.threads).find(k => url.includes(k));
+      return key ? mockState.threads[key] : null;
+    },
+  };
+}
+
 function makeSupabaseMock() {
   const bm = mockState.bmClientPresent ? {
     from: () => ({
@@ -61,11 +83,12 @@ function makeSupabaseMock() {
 }
 
 function loadScraperFresh({ realBriefs = false, redditApi = {} } = {}) {
-  for (const p of [SCRAPER_PATH, REDDIT_API_PATH, CRAWLEE_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
+  for (const p of [SCRAPER_PATH, REDDIT_API_PATH, CRAWLEE_PATH, RSS_PATH, SUPABASE_PATH, RUNTIME_CFG_PATH, BRIEFS_PATH]) {
     delete require.cache[p];
   }
   require.cache[REDDIT_API_PATH] = { id: REDDIT_API_PATH, filename: REDDIT_API_PATH, loaded: true, exports: makeRedditApiMock(redditApi) };
   require.cache[CRAWLEE_PATH] = { id: CRAWLEE_PATH, filename: CRAWLEE_PATH, loaded: true, exports: makeCrawleeMock() };
+  require.cache[RSS_PATH] = { id: RSS_PATH, filename: RSS_PATH, loaded: true, exports: makeRssMock() };
   require.cache[SUPABASE_PATH] = { id: SUPABASE_PATH, filename: SUPABASE_PATH, loaded: true, exports: makeSupabaseMock() };
   require.cache[RUNTIME_CFG_PATH] = {
     id: RUNTIME_CFG_PATH, filename: RUNTIME_CFG_PATH, loaded: true,
@@ -93,6 +116,9 @@ beforeEach(() => {
     inserts: [],
     promoteCalled: 0,
     crawleeCalls: [],
+    rssCalls: [],
+    rssEnabled: false,
+    rssForbiddenSubs: [],
     failSubs: [],
   };
 });
@@ -258,6 +284,31 @@ test('runRedditScrape: uses the Reddit API when configured (no Crawlee calls)', 
   assert.equal(mockState.crawleeCalls.length, 0, 'Crawlee must not run when the API works');
 });
 
+test('runRedditScrape: public RSS succeeds without OAuth and avoids the blocked HTML/Firecrawl path', async () => {
+  seedHappyPath();
+  mockState.rssEnabled = true;
+  const { runRedditScrape } = loadScraperFresh();
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2);
+  assert.equal(res.errors.length, 0);
+  assert.equal(res.source, 'rss');
+  assert.ok(mockState.rssCalls.includes('listing:HousingUK'));
+  assert.equal(mockState.crawleeCalls.length, 0, 'HTML/Firecrawl fallback must not run when RSS works');
+});
+
+test('runRedditScrape: RSS 403 skips an unsupported subreddit without Firecrawl error spam', async () => {
+  seedHappyPath();
+  mockState.rssEnabled = true;
+  mockState.rssForbiddenSubs = ['bridging'];
+  const { runRedditScrape } = loadScraperFresh();
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 1);
+  assert.equal(res.errors.length, 0);
+  assert.ok(!mockState.crawleeCalls.includes('listing:bridging'));
+});
+
 test('runRedditScrape: API failure falls back to Crawlee', async () => {
   seedHappyPath();
   const { runRedditScrape } = loadScraperFresh({ redditApi: {
@@ -301,7 +352,7 @@ test('runRedditScrape: both thread extractors failing leaves URLs retryable and 
   assert.equal(res.fetched, 0);
   assert.equal(res.errors.length, 2);
   assert.equal(mockState.inserts.length, 0, 'listing-only rows must never block a later full extraction');
-  assert.match(res.errors[0], /Reddit API failed.*Crawlee fallback failed/);
+  assert.match(res.errors[0], /Reddit API failed.*RSS failed.*browser fallback failed/);
 
   mockState.threads = {
     '/comments/aaa': { title: 'Thread A?', selftext: 'recovered body A', top_comments: ['c1'] },

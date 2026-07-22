@@ -93,8 +93,22 @@ test('llmJson: parse failure → retries once with JSON-only reminder appended',
   const out = await llmJson(llm, baseArgs, { label: 't' });
   assert.deepEqual(out, { ok: 2 });
   assert.equal(llm.calls.length, 2);
-  const retryContent = llm.calls[1].messages[llm.calls[1].messages.length - 1].content;
+  assert.equal(llm.calls[1].messages.at(-2).role, 'assistant');
+  assert.equal(llm.calls[1].messages.at(-2).content, 'not json at all');
+  const retryContent = llm.calls[1].messages.at(-1).content;
   assert.match(retryContent, /Return ONLY the JSON object/);
+});
+
+test('llmJson: repair turn preserves invalid prose so the model reformats rather than regenerates', async () => {
+  const prose = '£1,000. That is not a typo.\nGuide price: just £1,000';
+  const llm = stubLLM([prose, '{"copy_headline":"£1,000. Not a typo."}']);
+  const out = await llmJson(llm, baseArgs, { label: 'copy:auctionbrain/hook' });
+
+  assert.equal(out.copy_headline, '£1,000. Not a typo.');
+  assert.equal(llm.calls[1].messages.at(-2).role, 'assistant');
+  assert.equal(llm.calls[1].messages.at(-2).content, prose);
+  assert.equal(llm.calls[1].messages.at(-1).role, 'user');
+  assert.match(llm.calls[1].messages.at(-1).content, /Convert your previous answer into the required JSON schema/);
 });
 
 test('llmJson: all attempts fail → throws the last parse error', async () => {

@@ -91,5 +91,6 @@ test('registerCronJobs staggers Phase G away from the legacy 07:00 browser job',
   registerCronJobs();
 
   assert.equal(schedules.filter(expression => expression === '0 7 * * *').length, 1);
+  assert.ok(schedules.includes('15 7 * * 2,4'), 'queued blog cards must only sweep on Tuesday/Thursday');
   assert.ok(schedules.includes('30 7 * * *'));
 });
