@@ -78,7 +78,7 @@ test('runGenerate permits retry after generation throws', async () => {
   assert.equal(runs, 2, 'a failed batch must not mark the day complete');
 });
 
-test('registerCronJobs staggers Phase G away from the legacy 07:00 browser job', () => {
+test('registerCronJobs disables all automatic social draft generation by default', () => {
   delete require.cache[CRON_JOBS_PATH];
   delete require.cache[NODE_CRON_PATH];
   const schedules = [];
@@ -90,7 +90,32 @@ test('registerCronJobs staggers Phase G away from the legacy 07:00 browser job',
   const { registerCronJobs } = require('../lib/cron-jobs');
   registerCronJobs();
 
-  assert.equal(schedules.filter(expression => expression === '0 7 * * *').length, 1);
-  assert.ok(schedules.includes('15 7 * * 2,4'), 'queued blog cards must only sweep on Tuesday/Thursday');
+  assert.equal(schedules.includes('0 7 * * *'), false, 'legacy three-post social batch must be opt-in');
+  assert.equal(schedules.includes('30 7 * * *'), false, 'daily social-engine draft must be opt-in');
+  assert.equal(schedules.includes('0 8 * * 1'), false, 'weekly five-reel batch must be opt-in');
+  assert.ok(schedules.includes('15 7 * * 1,3'), 'blog cards should arrive Monday/Wednesday');
+});
+
+test('registerCronJobs preserves explicit opt-in for automatic social generation', () => {
+  delete require.cache[CRON_JOBS_PATH];
+  delete require.cache[NODE_CRON_PATH];
+  const previous = process.env.ENABLE_SOCIAL_GENERATION;
+  process.env.ENABLE_SOCIAL_GENERATION = 'true';
+  const schedules = [];
+  putMock(NODE_CRON_PATH, { schedule: expression => { schedules.push(expression); } });
+  putMock(PUBLISH_PATH, { publish: async () => ({}) });
+  putMock(TELEGRAM_PATH, { sendNotification: async () => {}, sendPostForReview: async () => ({ ok: true }) });
+  putMock(SUPABASE_PATH, { getApprovedPosts: async () => [], updatePostStatus: async () => {} });
+
+  try {
+    const { registerCronJobs } = require('../lib/cron-jobs');
+    registerCronJobs();
+  } finally {
+    if (previous === undefined) delete process.env.ENABLE_SOCIAL_GENERATION;
+    else process.env.ENABLE_SOCIAL_GENERATION = previous;
+  }
+
+  assert.ok(schedules.includes('0 7 * * *'));
   assert.ok(schedules.includes('30 7 * * *'));
+  assert.ok(schedules.includes('0 8 * * 1'));
 });

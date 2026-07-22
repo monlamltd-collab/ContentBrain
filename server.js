@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { timingSafeEqual, scryptSync, createHmac } = require('crypto');
-const { getDraftPosts, getApprovedPosts, updatePostStatus, getPostById, saveSeed, updateBlogPostStatus } = require('./lib/supabase');
+const { getDraftPosts, getApprovedPosts, archiveDraftSocialPosts, updatePostStatus, getPostById, saveSeed, updateBlogPostStatus } = require('./lib/supabase');
 const { publish } = require('./lib/publish');
 const { sendNotification, API, BOT_TOKEN } = require('./lib/telegram');
 const reviewRouter = require('./lib/review-api');
@@ -628,15 +628,28 @@ app.post('/api/triggers/lot', requireAuth, async (req, res) => {
 // ── START ──
 app.listen(PORT, async () => {
   console.log(`ContentBrain review UI running on port ${PORT}`);
-  console.log('Cron: generate at 7am daily, publish every 15 mins');
+  console.log(`Cron: social generation ${process.env.ENABLE_SOCIAL_GENERATION === 'true' ? 'enabled' : 'disabled'}, publish every 15 mins`);
   console.log('Telegram: polling for approve/reject buttons');
+
+  // Archive the old social approval backlog after switching to blog-only mode.
+  // Rows are retained as rejected, and outbound drafts (platform=NULL) are not
+  // touched. On later starts this is naturally a no-op.
+  let archivedSocialDrafts = 0;
+  if (process.env.ENABLE_SOCIAL_GENERATION !== 'true') {
+    archivedSocialDrafts = await archiveDraftSocialPosts().catch(err => {
+      console.error(`[startup] social draft archive failed: ${err.message}`);
+      return 0;
+    });
+  }
 
   // Notify on startup so you know the server is alive
   const drafts = await getDraftPosts().catch(() => []);
   const approved = await getApprovedPosts().catch(() => []);
   await sendNotification(
     `<b>ContentBrain started</b>\n\n` +
-    `Drafts: ${drafts.length} | Approved: ${approved.length}\n` +
+    `Social drafts: ${drafts.length} | Social approved: ${approved.length}\n` +
+    (archivedSocialDrafts ? `Archived old social drafts: ${archivedSocialDrafts}\n` : '') +
+    `Automatic social generation: ${process.env.ENABLE_SOCIAL_GENERATION === 'true' ? 'ON' : 'OFF'}\n` +
     `Publishing: ${process.env.FB_PAGE_ACCESS_TOKEN ? 'Facebook Direct' : process.env.MAKE_WEBHOOK_URL ? 'Make.com' : 'NOT CONFIGURED'}`
   );
 
