@@ -13,6 +13,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const TEMPLATES_DIR = path.join(__dirname, '..', '..', 'templates', 'social-engine');
@@ -47,6 +48,32 @@ test('renderer exports buildHtml + renderPost + renderAlbum', () => {
   assert.equal(typeof r.buildHtml, 'function');
   assert.equal(typeof r.renderPost, 'function');
   assert.equal(typeof r.renderAlbum, 'function');
+});
+
+test('renderer discovers installer library path from HOME and adds it to LD_LIBRARY_PATH', t => {
+  const { getBrowserLaunchOptions, defaultChromiumLibDir } = require('../../lib/renderer');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'contentbrain-chromium-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const env = { HOME: home, LD_LIBRARY_PATH: '/existing/libs' };
+  const libDir = path.join(home, '.local', 'chromium-libs', 'root', 'usr', 'lib', 'x86_64-linux-gnu');
+  fs.mkdirSync(libDir, { recursive: true });
+
+  const opts = getBrowserLaunchOptions({ executablePath: '/usr/bin/chromium', env });
+  assert.equal(defaultChromiumLibDir(env), libDir);
+  assert.equal(opts.env.LD_LIBRARY_PATH, `${libDir}:/existing/libs`);
+  assert.equal(opts.executablePath, '/usr/bin/chromium');
+  assert.ok(opts.args.includes('--disable-dev-shm-usage'));
+  assert.equal(defaultChromiumLibDir({}), '/data/.local/chromium-libs/root/usr/lib/x86_64-linux-gnu');
+});
+
+test('renderer honours CHROMIUM_LIB_ROOT used by the installer', t => {
+  const { getBrowserLaunchOptions } = require('../../lib/renderer');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'contentbrain-lib-root-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const libDir = path.join(root, 'root', 'usr', 'lib', 'x86_64-linux-gnu');
+  fs.mkdirSync(libDir, { recursive: true });
+  const opts = getBrowserLaunchOptions({ env: { HOME: '/not-used', CHROMIUM_LIB_ROOT: root } });
+  assert.equal(opts.env.LD_LIBRARY_PATH, libDir);
 });
 
 function makeFixturePost(overrides = {}) {

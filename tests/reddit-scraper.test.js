@@ -186,6 +186,7 @@ test('runRedditScrape: inserts new threads and promotes', async () => {
   assert.equal(res.subs, 2);
   assert.equal(res.listed, 2);
   assert.equal(res.inserted, 2);
+  assert.equal(res.source, 'crawlee');
   assert.equal(res.skipped, 0);
   assert.equal(res.promoted, 2);
   assert.equal(mockState.promoteCalled, 1);
@@ -252,6 +253,7 @@ test('runRedditScrape: uses the Reddit API when configured (no Crawlee calls)', 
   const res = await runRedditScrape();
 
   assert.equal(res.inserted, 2);
+  assert.equal(res.source, 'oauth');
   assert.ok(apiCalls.includes('listing:bridging'));
   assert.equal(mockState.crawleeCalls.length, 0, 'Crawlee must not run when the API works');
 });
@@ -267,4 +269,59 @@ test('runRedditScrape: API failure falls back to Crawlee', async () => {
 
   assert.equal(res.inserted, 2); // recovered via the Crawlee fallback
   assert.ok(mockState.crawleeCalls.includes('listing:bridging'));
+});
+
+test('runRedditScrape: empty API thread extraction falls back to Crawlee', async () => {
+  seedHappyPath();
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async (sub) => mockState.listings[sub] || [],
+    fetchThreadApi: async () => null,
+  } });
+
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 2);
+  assert.equal(res.errors.length, 0);
+  assert.ok(mockState.crawleeCalls.some(call => call.startsWith('thread:')));
+});
+
+test('runRedditScrape: both thread extractors failing leaves URLs retryable and reports errors', async () => {
+  seedHappyPath();
+  mockState.threads = {};
+  const { runRedditScrape } = loadScraperFresh({ redditApi: {
+    isRedditApiConfigured: () => true,
+    fetchSubredditListingApi: async (sub) => mockState.listings[sub] || [],
+    fetchThreadApi: async () => null,
+  } });
+
+  const res = await runRedditScrape();
+
+  assert.equal(res.inserted, 0);
+  assert.equal(res.fetched, 0);
+  assert.equal(res.errors.length, 2);
+  assert.equal(mockState.inserts.length, 0, 'listing-only rows must never block a later full extraction');
+  assert.match(res.errors[0], /Reddit API failed.*Crawlee fallback failed/);
+
+  mockState.threads = {
+    '/comments/aaa': { title: 'Thread A?', selftext: 'recovered body A', top_comments: ['c1'] },
+    '/comments/bbb': { title: 'Thread B', selftext: 'recovered body B', top_comments: ['c2'] },
+  };
+  const retry = await runRedditScrape();
+  assert.equal(retry.inserted, 2);
+  assert.equal(mockState.inserts.length, 2);
+});
+
+test('runRedditScrape: duplicate canonical URLs are fetched and inserted once', async () => {
+  seedHappyPath();
+  mockState.listings.HousingUK = [{
+    title: 'Same thread from another configured subreddit',
+    url: 'https://www.reddit.com/r/bridging/comments/aaa/different-slug/?ref=share',
+  }];
+  const { runRedditScrape } = loadScraperFresh();
+  const res = await runRedditScrape();
+
+  assert.equal(res.listed, 2);
+  assert.equal(res.inserted, 1);
+  assert.equal(mockState.inserts.length, 1);
 });

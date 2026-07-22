@@ -118,3 +118,15 @@ test('llmJson: original createArgs not mutated by retry', async () => {
   await llmJson(llm, args);
   assert.equal(args.messages[0].content, 'original');
 });
+
+test('llmJson: schema validation failure retries a syntactically valid object', async () => {
+  const llm = stubLLM(['{"wrong": true}', '{"required": "present"}']);
+  const out = await llmJson(llm, baseArgs, {
+    label: 'schema',
+    validate: value => {
+      if (!value.required) throw new Error('missing required');
+    },
+  });
+  assert.equal(out.required, 'present');
+  assert.equal(llm.calls.length, 2);
+});

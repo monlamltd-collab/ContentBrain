@@ -246,3 +246,17 @@ test('pickLotOfTheDay: fallbackUsed=false when primary archetype succeeds', asyn
 
   assert.equal(result.fallbackUsed, false); // primary archetype had a candidate
 });
+
+test('pickWeeklySuperlatives: targeted retry queries only requested archetypes', async () => {
+  const queried = [];
+  const { pickWeeklySuperlatives } = loadLotPickerFresh({
+    findLotsBySuperlative: async superlative => {
+      queried.push(superlative);
+      return [validLot(`lot-${superlative}`)];
+    },
+  });
+
+  const picks = await pickWeeklySuperlatives({ superlatives: ['worst-lot-week'] });
+  assert.deepEqual(queried, ['worst-lot-week']);
+  assert.deepEqual(picks.map(pick => pick.superlative), ['worst-lot-week']);
+});
