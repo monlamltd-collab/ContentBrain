@@ -77,58 +77,88 @@ test('stripDocs: returns primitives unchanged', () => {
 
 test('readBlueprint: reads ub-social-boost.blueprint.json + strips _-keys + lifts scheduling', () => {
   const { readBlueprint } = loadFresh();
-  const bp = readBlueprint(path.join(__dirname, '..', '..', '..', 'scripts', 'make', 'ub-social-boost.blueprint.json'));
+  const bp = readBlueprint(
+    path.join(__dirname, '..', '..', '..', 'scripts', 'make', 'ub-social-boost.blueprint.json'),
+    { hookId: 3453292 }
+  );
   assert.equal(bp.name, 'ub-social-boost');
-  // _doc / _targetTeamId etc. gone
   const json = JSON.stringify(bp.blueprint);
-  assert.equal(json.match(/"_[a-z]/g), null, 'stripped object still contains _-prefixed keys');
-  // scheduling is type=immediately (webhook-driven) — present at top of source file
+  assert.equal(json.match(/\"_[a-z]/g), null, 'stripped object still contains _-prefixed keys');
   assert.ok(bp.scheduling, 'expected scheduling lifted from blueprint');
+  assert.equal(bp.blueprint.scheduling, undefined);
+  assert.match(json, /"hook":3453292/);
+  assert.match(json, /util:SetVariables/);
+  assert.doesNotMatch(json, /util:SetVariables2/);
+  assert.doesNotMatch(json, /"filter"/);
+  assert.ok(bp.strippedFilters >= 1);
 });
 
 test('readBlueprint: reads ub-social-boost-reconcile.blueprint.json + scheduling = cron', () => {
   const { readBlueprint } = loadFresh();
-  const bp = readBlueprint(path.join(__dirname, '..', '..', '..', 'scripts', 'make', 'ub-social-boost-reconcile.blueprint.json'));
+  const bp = readBlueprint(
+    path.join(__dirname, '..', '..', '..', 'scripts', 'make', 'ub-social-boost-reconcile.blueprint.json')
+  );
   assert.equal(bp.name, 'ub-social-boost-reconcile');
-  assert.equal(bp.scheduling.type, 'cron');
-  assert.equal(bp.scheduling.cron, '0 6 * * *');
-  // scheduling lifted OUT of the blueprint
+  assert.equal(bp.scheduling.type, 'daily');
+  assert.equal(bp.scheduling.time, '06:00');
   assert.equal(bp.blueprint.scheduling, undefined);
+  // placeholder aggregator with _skipIfRejected removed
+  const modules = bp.blueprint.flow.map((m) => m.module);
+  assert.ok(!modules.includes('builtin:BasicAggregator') || modules.includes('builtin:Iterator'));
 });
 
 // ── provision (orchestration) ─────────────────────────────────
 
-test('provision (dry-run): validates both blueprints, makes no create calls', async () => {
-  // Validator returns valid response for each blueprint.
-  nextFetchResponses.push({ ok: true, body: { valid: true } });  // validate boost
-  nextFetchResponses.push({ ok: true, body: { valid: true } });  // validate reconcile
+test('provision (dry-run): local-validates, lists hooks, makes no create calls', async () => {
+  // dry-run ensureBoostHook path: GET hooks only
+  nextFetchResponses.push({
+    ok: true,
+    body: {
+      hooks: [
+        {
+          id: 7001,
+          name: 'ub-social-boost webhook',
+          typeName: 'gateway-webhook',
+          gone: false,
+          url: 'https://hook.eu1.make.com/abc',
+        },
+      ],
+    },
+  });
 
   const { provision } = loadFresh();
   const out = await provision({ dryRun: true });
-  assert.equal(fetchCalls.length, 2);  // 2 validate calls only
-  assert.ok(fetchCalls[0].url.endsWith('/scenarios/validate-blueprint'));
+  assert.equal(fetchCalls.length, 1);
+  assert.ok(fetchCalls[0].url.includes('/hooks?teamId='));
   assert.equal(out.created.length, 0);
   assert.equal(out.skipped.length, 0);
 });
 
-test('provision: validator failure aborts before create', async () => {
-  nextFetchResponses.push({ ok: true, body: { valid: false, errors: [{ message: 'bad module shape' }] } });
-  const { provision } = loadFresh();
-  await assert.rejects(() => provision({}), /failed validation/);
+test('provision: local validation failure aborts before network create', () => {
+  const mod = loadFresh();
+  assert.throws(
+    () => mod.validateLocal({ name: 'x', blueprint: { flow: [] }, scheduling: { type: 'cron' } }),
+    /flow must be a non-empty array/
+  );
 });
 
 test('provision: creates both scenarios when none exist + returns webhook URL', async () => {
-  // 2 validates
-  nextFetchResponses.push({ ok: true, body: { valid: true } });
-  nextFetchResponses.push({ ok: true, body: { valid: true } });
-  // listExistingScenarios -> empty
+  // ensureBoostHook -> GET hooks empty
+  nextFetchResponses.push({ ok: true, body: { hooks: [] } });
+  // ensureBoostHook -> POST hook
+  nextFetchResponses.push({
+    ok: true,
+    body: { hook: { id: 7001, url: 'https://hook.eu1.make.com/abc' } },
+  });
+  // listExistingScenarios
   nextFetchResponses.push({ ok: true, body: { scenarios: [] } });
   // create ub-social-boost
-  nextFetchResponses.push({ ok: true, body: { scenario: { id: 9001, hookId: 7001 } } });
-  // getWebhookUrl for hook 7001
-  nextFetchResponses.push({ ok: true, body: { hooks: [{ id: 7001, url: 'https://hook.eu1.make.com/abc' }] } });
+  nextFetchResponses.push({ ok: true, body: { scenario: { id: 9001, hookId: 7001, name: 'ub-social-boost' } } });
   // create reconcile
-  nextFetchResponses.push({ ok: true, body: { scenario: { id: 9002, hookId: null } } });
+  nextFetchResponses.push({
+    ok: true,
+    body: { scenario: { id: 9002, hookId: null, name: 'ub-social-boost-reconcile' } },
+  });
 
   const { provision } = loadFresh();
   const out = await provision({});
@@ -138,21 +168,53 @@ test('provision: creates both scenarios when none exist + returns webhook URL', 
   assert.equal(out.created[1].name, 'ub-social-boost-reconcile');
   assert.equal(out.created[1].id, 9002);
   assert.equal(out.webhookUrl, 'https://hook.eu1.make.com/abc');
+
+  // create calls must stringify blueprint + scheduling and omit top-level name
+  const createCalls = fetchCalls.filter(
+    (c) => c.opts && c.opts.method === 'POST' && String(c.url).endsWith('/scenarios')
+  );
+  assert.equal(createCalls.length, 2);
+  const body = JSON.parse(createCalls[0].opts.body);
+  assert.equal(typeof body.blueprint, 'string');
+  assert.equal(typeof body.scheduling, 'string');
+  assert.equal(body.teamId, 1406232);
+  assert.equal(body.name, undefined);
+  const parsedBp = JSON.parse(body.blueprint);
+  assert.equal(parsedBp.name, 'ub-social-boost');
+  assert.match(JSON.stringify(parsedBp), /"hook":7001/);
 });
 
 test('provision: idempotent — skips existing scenarios by name', async () => {
-  // 2 validates
-  nextFetchResponses.push({ ok: true, body: { valid: true } });
-  nextFetchResponses.push({ ok: true, body: { valid: true } });
-  // listExistingScenarios -> both already present
-  nextFetchResponses.push({ ok: true, body: {
-    scenarios: [
-      { id: 8001, name: 'ub-social-boost', hookId: 6001 },
-      { id: 8002, name: 'ub-social-boost-reconcile', hookId: null },
-    ],
-  } });
-  // getWebhookUrl for the existing ub-social-boost hook
-  nextFetchResponses.push({ ok: true, body: { hooks: [{ id: 6001, url: 'https://hook.eu1.make.com/existing' }] } });
+  // ensureBoostHook GET finds existing hook
+  nextFetchResponses.push({
+    ok: true,
+    body: {
+      hooks: [
+        {
+          id: 6001,
+          name: 'ub-social-boost webhook',
+          typeName: 'gateway-webhook',
+          gone: false,
+          url: 'https://hook.eu1.make.com/existing',
+        },
+      ],
+    },
+  });
+  // listExistingScenarios -> both present
+  nextFetchResponses.push({
+    ok: true,
+    body: {
+      scenarios: [
+        { id: 8001, name: 'ub-social-boost', hookId: 6001 },
+        { id: 8002, name: 'ub-social-boost-reconcile', hookId: null },
+      ],
+    },
+  });
+  // getWebhookUrl for existing boost
+  nextFetchResponses.push({
+    ok: true,
+    body: { hooks: [{ id: 6001, url: 'https://hook.eu1.make.com/existing' }] },
+  });
 
   const { provision } = loadFresh();
   const out = await provision({});
@@ -174,4 +236,17 @@ test('makeApi: sends Authorization: Token <MAKE_API_TOKEN>', async () => {
   await listExistingScenarios();
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].opts.headers.Authorization, 'Token test-token-XYZ');
+});
+
+test('renameModules + stripRouteFilters helpers', () => {
+  const { renameModules, stripRouteFilters } = loadFresh();
+  const renamed = renameModules({ module: 'util:SetVariables2', nested: { module: 'http:ActionSendData' } });
+  assert.equal(renamed.module, 'util:SetVariables');
+  assert.equal(renamed.nested.module, 'http:ActionSendData');
+  const { value, strippedFilters } = stripRouteFilters({
+    routes: [{ filter: { name: 'x' }, flow: [{ id: 1 }] }, { flow: [{ id: 2 }] }],
+  });
+  assert.equal(strippedFilters, 1);
+  assert.equal(value.routes[0].filter, undefined);
+  assert.ok(value.routes[0].flow);
 });
